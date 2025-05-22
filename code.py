@@ -1,648 +1,2522 @@
 import streamlit as st
 import pandas as pd
-import os
-from sqlalchemy import create_engine, text, inspect
+import numpy as np
 from datetime import datetime, timedelta
-import psycopg2
-import io
 import time
-import threading
+import os
+import io
+import hashlib
+import openpyxl
+from sqlalchemy import create_engine, text
 
-# -------- CONFIG DB --------
-DB_USER = "postgres"
-DB_PASS = "Dggies12345"
+# Configuración de conexión a PostgreSQL
 DB_HOST = "localhost"
 DB_PORT = "5432"
 DB_NAME = "postgres"
-
-engine = create_engine(f"postgresql://{DB_USER}:{DB_PASS}@{DB_HOST}:{DB_PORT}/{DB_NAME}")
-
-# Registro CSV archivo
-REGISTRO_CSV = "registro.csv"
-if not os.path.exists(REGISTRO_CSV):
-    pd.DataFrame(columns=["Licitacion", "Empresa", "Esquema", "Ubicacion", "Cargado", "UltimaActualizacion"]).to_csv(REGISTRO_CSV, index=False)
+DB_USER = "postgres"
+DB_PASSWORD = "Dggies12345"
 
 # Intervalo de actualización automática (en minutos)
-INTERVALO_ACTUALIZACION = 5
+INTERVALO_ACTUALIZACION = 10
 
-# Columnas para cada tabla con los nombres EXACTOS que vienen en el Excel:
-COLS_EJECUCION_GENERAL = [
-    "CODIGO DE REACTIVOS / INSUMOS", "I.D.", "MODALIDAD", "NUMERO DE LLAMADO", "AÑO DEL LLAMADO",
-    "NOMBRE DEL LLAMADO", "EMPRESA ADJUDICADA", "FECHA DE FIRMA DEL CONTRATO",
-    "N° de Contrato / Año", "Vigencia del Contrato", "Fecha de Inicio de Poliza",
-    "Fecha de Finalizacion de Poliza", "Porcentaje para emision de complementarios (USO INTERNO)",
-    "COMODATO // SIN COMODATO", "ESTADO DEL LOTE / ITEM", "LOTE", "ITEM", "DESCRIPCION DEL PRODUCTO",
-    "PRESENTACION", "MARCA", "PROCEDENCIA", "DESCRIPCION DEL PRODUCTO // MARCA // PROCEDENCIA",
-    "UNIDAD DE MEDIDA", "PRECIO UNITARIO", "CANTIDAD MINIMA", "CANTIDAD MAXIMA",
-    "REDISTRIBUCION (CANTIDAD MINIMA)", "REDISTRIBUCION (CANTIDAD MAXIMA)", "ENTRADAS 20% (ADENDAS DE AMPLIACION)",
-    "SALIDAS (ADENDAS DE DISMINUCION)", "TOTAL ADJUDICADO", "CANTIDAD EMITIDA", "SALDO A EMITIR", "PORCENTAJE EMITIDO"
-]
+# Crear conexión a PostgreSQL
+try:
+    engine = create_engine(f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}")
+except Exception as e:
+    print(f"Error al crear conexión a PostgreSQL: {e}")
 
-COLS_EJECUCION_POR_ZONAS = [
-    "CODIGO DE REACTIVOS / INSUMOS + CODIGO DE SERVICIO BENEFICIARIO", "CODIGO PARA SERVICIO BENEFICIARIO",
-    "CODIGO DE REACTIVOS / INSUMOS", "ESTADO SEGÚN DISTRIBUCION INTERNA", "SERVICIO BENEFICIARIO",
-    "Porcentaje para emision de complementarios (USO INTERNO)", "COMODATO // SIN COMODATO", "ESTADO DEL LOTE / ITEM",
-    "LOTE", "ITEM", "DESCRIPCION DEL PRODUCTO // MARCA // PROCEDENCIA", "UNIDAD DE MEDIDA", "PRECIO UNITARIO",
-    "CANTIDAD MINIMA", "CANTIDAD MAXIMA", "REDISTRIBUCION (CANTIDAD MINIMA)", "REDISTRIBUCION (CANTIDAD MAXIMA)",
-    "ENTRADAS 20% (ADENDAS DE AMPLIACION)", "SALIDAS (ADENDAS DE DISMINUCION)", "TOTAL ADJUDICADO", "CANTIDAD EMITIDA",
-    "SALDO A EMITIR", "PORCENTAJE EMITIDO POR SERVICIO SANITARIO", "PORCENTAJE DEL LOTE ITEM / GLOBAL", "OBSERVACION"
-]
+# Función para configurar la tabla de usuarios
+def configurar_tabla_usuarios():
+    """Crea la tabla de usuarios si no existe"""
+    try:
+        print("Intentando configurar tabla de usuarios...")
+        with engine.connect() as conn:
+            print("Conexión establecida, creando tabla...")
+            
+            # Crear esquema si no existe
+            conn.execute(text("""
+                CREATE SCHEMA IF NOT EXISTS reactivos_py;
+            """))
+            
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS reactivos_py.usuarios (
+                    id SERIAL PRIMARY KEY,
+                    cedula VARCHAR(20) UNIQUE NOT NULL,  -- Agregar la columna cédula
+                    username VARCHAR(50) UNIQUE NOT NULL,
+                    password VARCHAR(200) NOT NULL,
+                    nombre_completo VARCHAR(100) NOT NULL,
+                    role VARCHAR(20) NOT NULL DEFAULT 'user',
+                    fecha_creacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    ultimo_cambio_password TIMESTAMP
+                );
+            """))
+            
+            # Verificar si existe el usuario admin
+            query = text("SELECT COUNT(*) FROM reactivos_py.usuarios WHERE username = 'admin'")
+            result = conn.execute(query)
+            count = result.scalar()
+            
+            if count == 0:
+                # Crear usuario admin por defecto
+                password_hash = hashlib.sha256("admin".encode()).hexdigest()
+                
+                query = text("""
+                    INSERT INTO reactivos_py.usuarios (cedula, username, password, nombre_completo, role, ultimo_cambio_password)
+                    VALUES ('0000000', 'admin', :password, 'Administrador del Sistema', 'admin', CURRENT_TIMESTAMP)
+                """)
+                
+                conn.execute(query, {'password': password_hash})
+                print("Usuario admin creado")
+                
+            return True
+    except Exception as e:
+        print(f"Error configurando tabla de usuarios: {e}")
+        return False
 
-COLS_ORDEN_DE_COMPRA = [
-    "SIMESE (PEDIDO)", "N° ORDEN DE COMPRA", "FECHA DE EMISION",
-    "CODIGO DE REACTIVOS / INSUMOS + CODIGO DE SERVICIO BENEFICIARIO", "CODIGO DE REACTIVOS / INSUMOS",
-    "ESTADO SEGÚN DISTRIBUCION INTERNA", "ESTADO DEL LOTE / ITEM", "SERVICIO BENEFICIARIO", "COMODATO // SIN COMODATO",
-    "LOTE", "ITEM", "CANTIDAD SOLICITADA", "CANTIDAD COMPLEMENTARIA SOLICITADA", "UNIDAD DE MEDIDA",
-    "DESCRIPCION DEL PRODUCTO // MARCA // PROCEDENCIA", "PRECIO UNITARIO", "PORCENTAJE EMITIDO SERVICIO BENEFICIARIO",
-    "PORCENTAJE DEL LOTE ITEM / GLOBAL", "SALDO A EMITIR DEL SERVICIO SANITARIO", "MONTO EMITIDO",
-    "Porcentaje para emision de complementarios (USO INTERNO)", "Observaciones"
-]
+# Función para configurar la tabla de archivos cargados
+def configurar_tabla_cargas():
+    """Crea la tabla para registrar las cargas de archivos CSV"""
+    try:
+        with engine.connect() as conn:
+            # Crear esquema si no existe
+            conn.execute(text("""
+                CREATE SCHEMA IF NOT EXISTS reactivos_py;
+            """))
+            
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS reactivos_py.archivos_cargados (
+                    id SERIAL PRIMARY KEY,
+                    nombre_archivo VARCHAR(255) NOT NULL,
+                    esquema VARCHAR(100) NOT NULL,
+                    fecha_carga TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    usuario_id INTEGER NOT NULL,
+                    contenido_original TEXT,
+                    ubicacion_fisica VARCHAR(500),
+                    estado VARCHAR(50) DEFAULT 'Activo',
+                    FOREIGN KEY (usuario_id) REFERENCES reactivos_py.usuarios(id)
+                );
+            """))
+            return True
+    except Exception as e:
+        print(f"Error configurando tabla de archivos: {e}")
+        return False
 
-# Nueva tabla para los datos del llamado
-COLS_LLAMADO = [
-    "I.D.", "MODALIDAD", "NUMERO DE LLAMADO", "AÑO DEL LLAMADO",
-    "NOMBRE DEL LLAMADO", "EMPRESA ADJUDICADA", "FECHA DE FIRMA DEL CONTRATO",
-    "N° de Contrato / Año", "Vigencia del Contrato", "Fecha de Inicio de Poliza",
-    "Fecha de Finalizacion de Poliza"
-]
+# Crear tabla para almacenar órdenes de compra
+def configurar_tabla_ordenes_compra():
+    """Crea la tabla de órdenes de compra si no existe"""
+    try:
+        with engine.connect() as conn:
+            # Crear esquema si no existe
+            conn.execute(text("""
+                CREATE SCHEMA IF NOT EXISTS reactivos_py;
+            """))
+            
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS reactivos_py.ordenes_compra (
+                    id SERIAL PRIMARY KEY,
+                    numero_orden VARCHAR(50) UNIQUE NOT NULL,
+                    fecha_emision TIMESTAMP NOT NULL,
+                    esquema VARCHAR(100) NOT NULL,
+                    servicio_beneficiario VARCHAR(200),
+                    simese VARCHAR(50),
+                    usuario_id INTEGER NOT NULL,
+                    estado VARCHAR(50) NOT NULL DEFAULT 'Emitida',
+                    fecha_creacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (usuario_id) REFERENCES reactivos_py.usuarios(id)
+                );
+            """))
+            
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS reactivos_py.items_orden_compra (
+                    id SERIAL PRIMARY KEY,
+                    orden_compra_id INTEGER NOT NULL,
+                    lote VARCHAR(50),
+                    item VARCHAR(50),
+                    codigo_insumo VARCHAR(100),
+                    codigo_servicio VARCHAR(100),
+                    descripcion TEXT,
+                    cantidad NUMERIC(15, 2) NOT NULL,
+                    unidad_medida VARCHAR(50),
+                    precio_unitario NUMERIC(15, 2),
+                    monto_total NUMERIC(15, 2),
+                    observaciones TEXT,
+                    FOREIGN KEY (orden_compra_id) REFERENCES reactivos_py.ordenes_compra(id) ON DELETE CASCADE
+                );
+            """))
+            
+            return True
+    except Exception as e:
+        print(f"Error configurando tablas de órdenes de compra: {e}")
+        return False
+
+def configurar_tabla_proveedores():
+    """Crea la tabla de proveedores si no existe"""
+    try:
+        with engine.connect() as conn:
+            # Crear esquema si no existe
+            conn.execute(text("""
+                CREATE SCHEMA IF NOT EXISTS reactivos_py;
+            """))
+            
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS reactivos_py.proveedores (
+                    id SERIAL PRIMARY KEY,
+                    nombre VARCHAR(200) NOT NULL,
+                    ruc VARCHAR(50) UNIQUE NOT NULL,
+                    fecha_registro TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+            """))
+            
+            return True
+    except Exception as e:
+        print(f"Error configurando tabla de proveedores: {e}")
+        return False
+
+def numero_a_letras(numero):
+    """Convierte un número a su representación en letras (simplificada)"""
+    millones = int(numero / 1000000)
+    miles = int((numero % 1000000) / 1000)
+    unidades = int(numero % 1000)
+    
+    texto = ""
+    
+    if millones > 0:
+        if millones == 1:
+            texto += "UN MILLÓN "
+        else:
+            texto += f"{millones} MILLONES "
+    
+    if miles > 0:
+        texto += f"{miles} MIL "
+    
+    if unidades > 0 or (millones == 0 and miles == 0):
+        texto += f"{unidades} "
+    
+    return texto.strip()
+
 
 def iniciar_actualizacion_automatica():
-    """Inicia una tarea en segundo plano para actualizar cada INTERVALO_ACTUALIZACION minutos"""
+    """Configura la actualización automática de datos"""
+    # Verificar si ya se ha iniciado la actualización
     if 'ultima_actualizacion' not in st.session_state:
         st.session_state.ultima_actualizacion = datetime.now()
-        # Realizar la primera sincronización al iniciar
-        sincronizar_csv_con_postgres()
-    
-    # Verificar si es hora de actualizar (cada INTERVALO_ACTUALIZACION minutos)
-    tiempo_actual = datetime.now()
-    tiempo_transcurrido = tiempo_actual - st.session_state.ultima_actualizacion
-    
-    if tiempo_transcurrido.total_seconds() > (INTERVALO_ACTUALIZACION * 60):
-        # Es hora de actualizar
-        with st.spinner(f"Actualizando automáticamente información de archivos fuente..."):
-            result = sincronizar_csv_con_postgres()
-            if "error" not in result:
-                st.session_state.ultima_actualizacion = tiempo_actual
-                return True
-    
-    return False
-
-def crear_esquema(esquema):
-    with engine.connect() as conn:
-        conn.execute(text(f'CREATE SCHEMA IF NOT EXISTS "{esquema}"'))
-
-def limpiar_columnas(df, cols):
-    # Dejamos solo columnas que existan y en el orden esperado
-    cols_validas = [c for c in cols if c in df.columns]
-    return df[cols_validas]
-
-def guardar_tabla(df, esquema, tabla):
-    # Guarda tabla en esquema con nombre tabla, reemplazando si existe
-    df.to_sql(tabla, con=engine, schema=esquema, if_exists='replace', index=False)
-
-def analizar_excel(file):
-    """
-    Analiza la estructura de un archivo Excel mostrando sus hojas y columnas.
-    
-    Args:
-        file (UploadedFile): Archivo Excel cargado por el usuario
-    """
-    try:
-        xls = pd.ExcelFile(file)
-        st.write("### Estructura del archivo Excel")
-        
-        # Mostrar lista de hojas
-        st.write(f"**Hojas encontradas ({len(xls.sheet_names)}):**")
-        for i, sheet_name in enumerate(xls.sheet_names, 1):
-            st.write(f"{i}. '{sheet_name}'")
-        
-        # Permitir al usuario ver una muestra de cada hoja
-        sheet_to_preview = st.selectbox(
-            "Selecciona una hoja para previsualizar:", 
-            options=xls.sheet_names
-        )
-        
-        if sheet_to_preview:
-            # Leer una muestra pequeña de la hoja (primeras 5 filas)
-            sample_df = xls.parse(sheet_to_preview, nrows=5)
-            
-            # Mostrar columnas
-            st.write(f"**Columnas en '{sheet_to_preview}' ({len(sample_df.columns)}):**")
-            st.write(", ".join(sample_df.columns.tolist()))
-            
-            # Mostrar muestra de datos
-            st.write(f"**Muestra de datos de '{sheet_to_preview}':**")
-            st.dataframe(sample_df)
-            
-            # Comparar con columnas esperadas según el tipo de hoja
-            expected_columns = None
-            if sheet_to_preview.lower() == "ejecucion_general":
-                expected_columns = COLS_EJECUCION_GENERAL
-            elif sheet_to_preview.lower() == "ejecucion_por_zonas":
-                expected_columns = COLS_EJECUCION_POR_ZONAS
-            elif sheet_to_preview.lower() == "orden_de_compra":
-                expected_columns = COLS_ORDEN_DE_COMPRA
-            elif sheet_to_preview.lower() == "llamado":
-                expected_columns = COLS_LLAMADO
-            
-            if expected_columns:
-                # Columnas faltantes y extras
-                missing_cols = [col for col in expected_columns if col not in sample_df.columns]
-                extra_cols = [col for col in sample_df.columns if col not in expected_columns]
-                
-                if missing_cols:
-                    st.warning(f"**Columnas faltantes ({len(missing_cols)}):**")
-                    st.write(", ".join(missing_cols))
-                
-                if extra_cols:
-                    st.info(f"**Columnas adicionales ({len(extra_cols)}):**")
-                    st.write(", ".join(extra_cols))
-                
-                if not missing_cols and not extra_cols:
-                    st.success("✅ Las columnas de esta hoja coinciden exactamente con el formato esperado.")
-        
-    except Exception as e:
-        st.error(f"Error al analizar el archivo Excel: {str(e)}")
-        return False
-    
-    return True
-
-def cargar_archivo(esquema, file):
-    """
-    Carga un archivo Excel en la base de datos PostgreSQL, verificando las hojas disponibles.
-    
-    Args:
-        esquema (str): Nombre del esquema en PostgreSQL donde se guardarán las tablas
-        file (UploadedFile): Archivo Excel cargado por el usuario
-    """
-    try:
-        # Leer Excel para verificar hojas disponibles
-        xls = pd.ExcelFile(file)
-        sheet_names = [name.lower() for name in xls.sheet_names]
-        
-        # Verificar si existen las hojas necesarias (comparación case-insensitive)
-        expected_sheets = ["ejecucion_general", "ejecucion_por_zonas", "orden_de_compra", "llamado"]
-        missing_sheets = []
-        actual_sheet_mapping = {}  # Mapeo de nombres esperados a los reales
-        
-        for expected in expected_sheets:
-            found = False
-            for actual in xls.sheet_names:
-                if expected == actual.lower():
-                    actual_sheet_mapping[expected] = actual
-                    found = True
-                    break
-            if not found:
-                missing_sheets.append(expected)
-        
-        # Si faltan hojas, mostrar un error informativo
-        if missing_sheets:
-            st.error(f"El archivo Excel no contiene las siguientes hojas requeridas: {', '.join(missing_sheets)}")
-            st.info(f"Hojas encontradas en el archivo: {', '.join(xls.sheet_names)}")
-            st.info("Por favor, verifica que el archivo tiene las hojas correctas: 'ejecucion_general', 'ejecucion_por_zonas', 'orden_de_compra', 'llamado'")
-            
-            # Si falta solo la hoja "llamado", ofrecer crearla automáticamente
-            if missing_sheets == ["llamado"] and "ejecucion_general" in actual_sheet_mapping:
-                # Preguntar si quiere crear la hoja llamado automáticamente
-                st.warning("La hoja 'llamado' no existe, pero se puede generar automáticamente a partir de 'ejecucion_general'")
-                if st.button("Generar hoja 'llamado' automáticamente"):
-                    try:
-                        # Extraer datos de ejecucion_general para crear la tabla llamado
-                        ejec_general_df = xls.parse(actual_sheet_mapping["ejecucion_general"])
-                        
-                        # Crear DataFrame para la tabla llamado extrayendo datos únicos relevantes
-                        llamado_data = ejec_general_df[COLS_LLAMADO].drop_duplicates().reset_index(drop=True)
-                        
-                        # Crear esquema y guardar la tabla llamado generada
-                        crear_esquema(esquema)
-                        guardar_tabla(llamado_data, esquema, "llamado")
-                        
-                        # Continuar con las otras tablas existentes
-                        ejec_general = limpiar_columnas(ejec_general_df, COLS_EJECUCION_GENERAL)
-                        ejec_zonas = limpiar_columnas(xls.parse(actual_sheet_mapping["ejecucion_por_zonas"]), COLS_EJECUCION_POR_ZONAS)
-                        orden_compra = limpiar_columnas(xls.parse(actual_sheet_mapping["orden_de_compra"]), COLS_ORDEN_DE_COMPRA)
-                        
-                        # Guardar tablas existentes
-                        guardar_tabla(ejec_general, esquema, "ejecucion_general")
-                        guardar_tabla(ejec_zonas, esquema, "ejecucion_por_zonas")
-                        guardar_tabla(orden_compra, esquema, "orden_de_compra")
-                        
-                        st.success("✅ Se generó la hoja 'llamado' automáticamente y se cargaron todas las tablas con éxito.")
-                        return True
-                    except Exception as e:
-                        st.error(f"Error al generar la hoja 'llamado' automáticamente: {str(e)}")
-                        return False
-            
-            return False
-        
-        # Si todas las hojas existen, cargar las tablas
-        crear_esquema(esquema)
-        
-        # Cargar cada tabla filtrando columnas (usando los nombres reales encontrados)
-        ejec_general = limpiar_columnas(xls.parse(actual_sheet_mapping["ejecucion_general"]), COLS_EJECUCION_GENERAL)
-        ejec_zonas = limpiar_columnas(xls.parse(actual_sheet_mapping["ejecucion_por_zonas"]), COLS_EJECUCION_POR_ZONAS)
-        orden_compra = limpiar_columnas(xls.parse(actual_sheet_mapping["orden_de_compra"]), COLS_ORDEN_DE_COMPRA)
-        llamado = limpiar_columnas(xls.parse(actual_sheet_mapping["llamado"]), COLS_LLAMADO)
-        
-        # Guardar cada tabla en la base de datos
-        guardar_tabla(ejec_general, esquema, "ejecucion_general")
-        guardar_tabla(ejec_zonas, esquema, "ejecucion_por_zonas")
-        guardar_tabla(orden_compra, esquema, "orden_de_compra")
-        guardar_tabla(llamado, esquema, "llamado")
-        
-        return True
-        
-    except Exception as e:
-        st.error(f"Error al procesar el archivo Excel: {str(e)}")
-        return False
-
-def actualizar_registro(licitacion, empresa, esquema, ubicacion):
-    df = pd.read_csv(REGISTRO_CSV)
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    # Evitar duplicados
-    df = df[~((df['Esquema'] == esquema))]
-    nueva_fila = pd.DataFrame({
-        "Licitacion": [licitacion],
-        "Empresa": [empresa],
-        "Esquema": [esquema],
-        "Ubicacion": [ubicacion],
-        "Cargado": [now],
-        "UltimaActualizacion": [now]
-    })
-    df = pd.concat([df, nueva_fila], ignore_index=True)
-    df.to_csv(REGISTRO_CSV, index=False)
-
-def mostrar_tablas_columnas(esquema):
-    try:
-        inspector = inspect(engine)
-        tablas = inspector.get_table_names(schema=esquema)
-        if tablas:
-            for tabla in tablas:
-                st.write(f"**Tabla:** {tabla}")
-                columnas = inspector.get_columns(tabla, schema=esquema)
-                if columnas:
-                    df_col = pd.DataFrame(columnas)[['name', 'type']]
-                    st.table(df_col)
-                else:
-                    st.write("No hay columnas para esta tabla.")
-        else:
-            st.info("Este esquema no tiene tablas.")
-    except Exception as e:
-        st.error(f"Error consultando esquema: {e}")
+    else:
+        # Verificar si es hora de actualizar
+        tiempo_transcurrido = (datetime.now() - st.session_state.ultima_actualizacion).total_seconds() / 60
+        if tiempo_transcurrido >= INTERVALO_ACTUALIZACION:
+            st.session_state.ultima_actualizacion = datetime.now()
+            st.info("Actualizando datos...")
+            # Aquí puedes poner el código para refrescar los datos
+            time.sleep(1)
+            st.rerun()
 
 def obtener_esquemas_postgres():
-    """Obtiene todos los esquemas de PostgreSQL excepto los del sistema"""
+    """Obtiene la lista de esquemas existentes en PostgreSQL, excluyendo esquemas del sistema"""
     try:
         with engine.connect() as conn:
             query = text("""
-                SELECT schema_name 
-                FROM information_schema.schemata 
-                WHERE schema_name NOT IN 
-                ('pg_catalog', 'information_schema', 'pg_toast', 'pg_temp_1', 
-                'pg_toast_temp_1', 'public')
+                SELECT schema_name
+                FROM information_schema.schemata
+                WHERE schema_name NOT IN ('pg_catalog', 'information_schema', 'public', 'reactivos_py', 'pg_toast')
+                AND schema_name NOT LIKE 'pg_temp_%'
+                AND schema_name NOT LIKE 'pg_toast_temp_%'
+                ORDER BY schema_name
             """)
+            
             result = conn.execute(query)
+            
             esquemas = [row[0] for row in result]
             return esquemas
     except Exception as e:
-        st.error(f"Error consultando esquemas de PostgreSQL: {e}")
+        st.error(f"Error obteniendo esquemas: {e}")
         return []
 
-def eliminar_esquema(esquema):
+def cargar_archivo_a_postgres(archivo, nombre_archivo, esquema, empresa_prefijo=None, datos_formulario=None):
+    """Carga un archivo Excel o CSV directamente a PostgreSQL"""
+    try:
+        # Primero, crear el esquema explícitamente
+        with engine.connect() as conn:
+            conn.execute(text(f'CREATE SCHEMA IF NOT EXISTS "{esquema}"'))
+            conn.commit()
+        
+        # Resto del procesamiento del archivo...
+        # [código existente para procesar Excel/CSV]
+        
+        # Al crear la tabla LLAMADO, combinar datos del formulario con datos del Excel
+        if datos_formulario and empresa_prefijo:
+            tabla_llamado = f"{empresa_prefijo}_llamado"
+            
+            # Crear DataFrame con datos del formulario
+            llamado_df = pd.DataFrame({
+                'NOMBRE_LICITACION': [datos_formulario['nombre_licitacion']],
+                'I_D': [datos_formulario['id_licitacion']],
+                'NOMBRE_DEL_LLAMADO': [datos_formulario['nombre_llamado']],
+                'EMPRESA_ADJUDICADA': [datos_formulario['empresa_adjudicada']],
+                'RUC': [datos_formulario['ruc']],
+                'FECHA_FIRMA_CONTRATO': [datos_formulario['fecha_firma']],
+                'NUMERO_CONTRATO': [datos_formulario['numero_contrato']],
+                'VIGENCIA_CONTRATO': [datos_formulario['vigencia_contrato']]
+            })
+            
+            # Guardar tabla llamado combinada
+            llamado_df.to_sql(tabla_llamado, con=engine, schema=esquema, if_exists='replace', index=False)
+        
+        # Resto del código...
+        
+        return True, f"Archivo cargado correctamente con ID: {archivo_id}"
+    except Exception as e:
+        return False, f"Error al cargar archivo: {e}"
+
+def obtener_archivos_cargados():
+    """Obtiene la lista de archivos cargados con su estado actual"""
     try:
         with engine.connect() as conn:
-            conn.execute(text(f'DROP SCHEMA IF EXISTS "{esquema}" CASCADE;'))
-        
-        # Actualizar CSV
-        df = pd.read_csv(REGISTRO_CSV)
-        df = df[df['Esquema'] != esquema]
-        df.to_csv(REGISTRO_CSV, index=False)
-        return True
-    except Exception as e:
-        st.error(f"Error eliminando esquema: {e}")
-        return False
-
-def obtener_info_esquema(esquema):
-    """Obtiene información del esquema desde el CSV si existe"""
-    df = pd.read_csv(REGISTRO_CSV)
-    info = df[df['Esquema'] == esquema]
-    if not info.empty:
-        return info.iloc[0].to_dict()
-    else:
-        # Si no existe en el CSV, devolvemos información básica
-        return {
-            "Licitacion": "Desconocido",
-            "Empresa": "Desconocido",
-            "Esquema": esquema,
-            "Ubicacion": "Desconocido",
-            "Cargado": "Desconocido"
-        }
-
-def sincronizar_csv_con_postgres():
-    """Sincroniza el CSV con los esquemas reales en PostgreSQL"""
-    try:
-        # Obtener esquemas de PostgreSQL
-        esquemas_postgres = obtener_esquemas_postgres()
-        
-        # Leer CSV actual
-        df = pd.read_csv(REGISTRO_CSV)
-        
-        # Añadir columna UltimaActualizacion si no existe
-        if "UltimaActualizacion" not in df.columns:
-            df["UltimaActualizacion"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            query = text("""
+                SELECT ac.id, ac.nombre_archivo, ac.esquema, ac.fecha_carga, 
+                       u.username as usuario, ac.estado
+                FROM archivos_cargados ac
+                JOIN usuarios u ON ac.usuario_id = u.id
+                ORDER BY ac.fecha_carga DESC
+            """)
             
-        esquemas_csv = df['Esquema'].tolist() if not df.empty else []
-        
-        # Esquemas en Postgres pero no en CSV
-        esquemas_faltantes = [e for e in esquemas_postgres if e not in esquemas_csv]
-        
-        # Esquemas en CSV pero no en Postgres
-        esquemas_sobrantes = [e for e in esquemas_csv if e not in esquemas_postgres]
-        
-        # Añadir esquemas faltantes al CSV
-        for esquema in esquemas_faltantes:
-            nueva_fila = pd.DataFrame({
-                "Licitacion": ["Desconocido - Detectado automáticamente"],
-                "Empresa": ["Desconocido - Detectado automáticamente"],
-                "Esquema": [esquema],
-                "Ubicacion": ["Desconocido"],
-                "Cargado": ["Detectado: " + datetime.now().strftime("%Y-%m-%d %H:%M:%S")],
-                "UltimaActualizacion": [datetime.now().strftime("%Y-%m-%d %H:%M:%S")]
-            })
-            df = pd.concat([df, nueva_fila], ignore_index=True)
-        
-        # Actualizar la hora de la última verificación para todos los registros
-        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        df["UltimaActualizacion"] = now
-        
-        # Marcar esquemas que ya no existen en PostgreSQL
-        for idx, row in df.iterrows():
-            if row['Esquema'] in esquemas_sobrantes:
-                df.at[idx, 'Ubicacion'] = f"[NO EXISTE EN DB] {df.at[idx, 'Ubicacion']}"
-        
-        # Guardar cambios
-        df.to_csv(REGISTRO_CSV, index=False)
-        
-        return {
-            "esquemas_postgres": esquemas_postgres,
-            "esquemas_faltantes": esquemas_faltantes,
-            "esquemas_sobrantes": esquemas_sobrantes,
-            "ultima_actualizacion": now
-        }
+            result = conn.execute(query)
+            
+            archivos = []
+            for row in result:
+                archivos.append({
+                    'id': row[0],
+                    'nombre_archivo': row[1],
+                    'esquema': row[2],
+                    'fecha_carga': row[3],
+                    'usuario': row[4],
+                    'estado': row[5]
+                })
+            
+            return archivos
     except Exception as e:
-        st.error(f"Error sincronizando CSV con PostgreSQL: {e}")
-        return {"error": str(e)}
+        st.error(f"Error obteniendo archivos cargados: {e}")
+        return []
+
+def eliminar_esquema_postgres(esquema):
+    """Elimina un esquema de PostgreSQL y actualiza la tabla de cargas"""
+    try:
+        with engine.connect() as conn:
+            # Iniciar transacción
+            trans = conn.begin()
+            try:
+                # Actualizar estado en la tabla de archivos cargados
+                query_update = text("""
+                    UPDATE archivos_cargados
+                    SET estado = 'Eliminado'
+                    WHERE esquema = :esquema
+                """)
+                
+                conn.execute(query_update, {'esquema': esquema})
+                
+                # Eliminar el esquema
+                query = text(f'DROP SCHEMA IF EXISTS "{esquema}" CASCADE')
+                conn.execute(query)
+                
+                # Confirmar transacción
+                trans.commit()
+                
+                return True, f"Esquema '{esquema}' eliminado correctamente."
+            except Exception as e:
+                # Revertir transacción en caso de error
+                trans.rollback()
+                raise e
+    except Exception as e:
+        return False, f"Error al eliminar esquema: {e}"
+
+def pagina_login():
+    """Página de inicio de sesión"""
+    st.title("Sistema de Gestión de Licitaciones")
+    st.subheader("Iniciar sesión")
+    
+    col1, col2 = st.columns([1, 1])
+    
+    with col1:
+        cedula = st.text_input("Cédula de Identidad:")  # Cambiar a cédula
+        password = st.text_input("Contraseña:", type="password")
+        
+        if st.button("Ingresar"):
+            if not cedula or not password:  # Cambiar validación
+                st.error("Por favor, complete todos los campos.")
+            else:
+                # Verificar credenciales
+                password_hash = hashlib.sha256(password.encode()).hexdigest()
+                
+                try:
+                    with engine.connect() as conn:
+                        # Modificar la consulta para usar cédula
+                        query = text("""
+                            SELECT id, username, role, nombre_completo, ultimo_cambio_password 
+                            FROM reactivos_py.usuarios 
+                            WHERE cedula = :cedula AND password = :password
+                        """)
+                        
+                        result = conn.execute(query, {
+                            'cedula': cedula,  # Usar cédula
+                            'password': password_hash
+                        })
+                        
+                        user = result.fetchone()
+                        
+                        if user:
+                            # Autenticación exitosa
+                            st.session_state.logged_in = True
+                            st.session_state.user_id = user[0]
+                            st.session_state.username = user[1]
+                            st.session_state.user_role = user[2]
+                            st.session_state.user_name = user[3]
+                            
+                            # Verificar si se requiere cambio de contraseña
+                            if user[4] is None:  # ultimo_cambio_password es NULL
+                                st.session_state.requiere_cambio_password = True
+                                st.warning("Se requiere cambiar su contraseña. Será redirigido para hacerlo.")
+                                time.sleep(2)
+                            else:
+                                st.session_state.requiere_cambio_password = False
+                            
+                            st.success("Inicio de sesión exitoso!")
+                            time.sleep(1)
+                            st.rerun()
+                        else:
+                            st.error("Cédula o contraseña incorrectos.")  # Cambiar mensaje
+                except Exception as e:
+                    st.error(f"Error al verificar credenciales: {e}")    
+    with col2:
+        st.image("https://via.placeholder.com/300x200?text=Logo+Sistema", width=300)
+
+
+def main():
+    # (Código existente hasta la verificación de login)
+    
+    # Verificar si el usuario está autenticado
+    if not st.session_state.logged_in:
+        pagina_login()
+        return
+    
+    # AGREGAR ESTE BLOQUE - Verificar si el usuario requiere cambio de contraseña
+    if 'requiere_cambio_password' in st.session_state and st.session_state.requiere_cambio_password:
+        pagina_cambiar_password()
+        return
 
 def pagina_cargar_archivo():
-    st.header("Cargar archivo Excel")
+    """Página para cargar un nuevo archivo"""
+    st.header("Cargar Archivo")
     
-    # Iniciar actualización automática
-    iniciar_actualizacion_automatica()
-    
-    licitacion = st.text_input("Licitación")
-    empresa = st.text_input("Empresa Adjudicada")
-
-    if licitacion and empresa:
-        esquema = f"{licitacion.strip().replace(' ', '_').lower()}_{empresa.strip().replace(' ', '_').lower()}"
-        st.text(f"Nombre del esquema: {esquema} (no editable)")
-
-        archivo = st.file_uploader("Selecciona archivo Excel", type=["xls", "xlsx"])
-
-        if archivo is not None:
-            # Añadir pestañas para análisis y carga
-            tab1, tab2 = st.tabs(["📊 Análisis del archivo", "💾 Cargar a la base de datos"])
+    # Formulario para subir archivo
+    with st.form("upload_form"):
+        st.subheader("📋 Información de la Licitación")
+        
+        # Función para obtener proveedores
+       # Función para obtener proveedores
+def obtener_proveedores():
+    try:
+        with engine.connect() as conn:
+            query = text("""
+                SELECT razon_social, ruc 
+                FROM reactivos_py.proveedores 
+                WHERE activo = TRUE 
+                ORDER BY razon_social
+            """)
+            result = conn.execute(query)
+            return [{'nombre': row[0], 'ruc': row[1]} for row in result]
+    except:
+        return []
+        
+        # Campos en el orden solicitado
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            id_licitacion = st.text_input("I.D.:")
+            modalidad = st.text_input("Modalidad:", placeholder="Ej: CD, LP, LC, CO, LPN, CVE, LPI, LCO, MCN...")
+            numero_anio = st.text_input("N° / Año de Modalidad:")
+        
+        with col2:
+            nombre_llamado = st.text_input("Nombre del llamado:")
             
-            with tab1:
-                st.subheader("Análisis del archivo Excel")
-                st.info("""
-                Antes de cargar el archivo, es recomendable verificar su estructura.
-                El archivo debe contener las hojas 'ejecucion_general', 'ejecucion_por_zonas', 'orden_de_compra' y 'llamado'.
-                """)
-                # Inicializar estado de análisis si no existe
-                if 'archivo_analizado' not in st.session_state:
-                    st.session_state.archivo_analizado = False
+            # Autocompletado de proveedores
+            proveedores_existentes = obtener_proveedores()
+            
+            if proveedores_existentes:
+                empresa_options = [f"{p['nombre']} - {p['ruc']}" for p in proveedores_existentes]
                 
-                # Botón para analizar (solo se muestra si aún no se ha analizado)
-                if not st.session_state.archivo_analizado:
-                    if st.button("Analizar archivo"):
-                        analizar_excel(archivo)
+                empresa_seleccionada = st.selectbox(
+                    "Empresa Adjudicada:",
+                    options=["Seleccionar..."] + empresa_options + ["+ Nuevo Proveedor"]
+                )
+                
+                if empresa_seleccionada == "+ Nuevo Proveedor":
+                    st.info("💡 Vaya a 'Gestión de Proveedores' para registrar una nueva empresa")
+                    empresa_adjudicada = st.text_input("Nombre de la empresa:", disabled=True)
+                    ruc = st.text_input("RUC:", disabled=True)
+                elif empresa_seleccionada != "Seleccionar...":
+                    # Extraer datos del proveedor seleccionado
+                    empresa_adjudicada = empresa_seleccionada.split(" - ")[0]
+                    ruc_autocompletado = empresa_seleccionada.split(" - ")[-1]
+                    ruc = st.text_input("RUC:", value=ruc_autocompletado, disabled=True)
                 else:
-                    # Si ya se analizó, mostrar resultados directamente
-                    analizar_excel(archivo)
-                    
-                    # Opción para reiniciar análisis
-                    if st.button("Reiniciar análisis"):
-                        st.session_state.archivo_analizado = False
-                        st.session_state.hojas_excel = []
-                        st.session_state.hoja_seleccionada = None
-                        st.session_state.muestra_datos = None
-                        st.session_state.columnas_hoja = []
-                        st.rerun()
+                    empresa_adjudicada = ""
+                    ruc = st.text_input("RUC:", disabled=True)
+            else:
+                st.warning("⚠️ No hay proveedores registrados. Registre primero en 'Gestión de Proveedores'")
+                empresa_adjudicada = st.text_input("Empresa Adjudicada:", disabled=True)
+                ruc = st.text_input("RUC:", disabled=True)
+        
+        # Segunda fila de campos
+        col3, col4 = st.columns(2)
+        
+        with col3:
+            vigencia_contrato = st.text_input("Vigencia del Contrato:")
+        
+        with col4:
+            fecha_firma = st.date_input("Fecha de la firma del contrato:")
+        
+        # Otros campos adicionales
+        col5, col6 = st.columns(2)
+        
+        with col5:
+            numero_contrato = st.text_input("Número de contrato/año:")
+        
+        with col6:
+            # Generar sugerencia de nombre de esquema
+            if modalidad and numero_anio:
+                esquema_sugerido = f"{modalidad.strip().lower()}-{numero_anio.strip()}"
+                esquema_personalizado = st.text_input("Nombre del esquema:", value=esquema_sugerido)
+            else:
+                esquema_personalizado = st.text_input("Nombre del esquema:")
+        
+        st.divider()
+        
+        # Campo para subir archivo
+        archivo = st.file_uploader("Seleccionar archivo:", type=["csv", "xlsx", "xls"])
+        
+        # SECCIÓN DE ANÁLISIS DE DATOS
+        if archivo is not None:
+            st.subheader("📊 Análisis del Archivo")
             
-            with tab2:
-                st.subheader("Cargar archivo a la base de datos")
-                with st.expander("ℹ️ Formato de archivo esperado"):
-                    st.info("""
-                    El archivo Excel debe contener las siguientes hojas:
-                    - ejecucion_general
-                    - ejecucion_por_zonas
-                    - orden_de_compra
-                    - llamado
+            # Checkbox para activar análisis
+            mostrar_analisis = st.checkbox("🔍 Mostrar análisis detallado del archivo")
+            
+            if mostrar_analisis:
+                try:
+                    # Determinar el tipo de archivo
+                    extension = archivo.name.split('.')[-1].lower()
                     
-                    Asegúrate de que los nombres de las hojas están escritos correctamente.
+                    if extension in ['xlsx', 'xls']:
+                        # Análisis para archivos Excel
+                        xls = pd.ExcelFile(archivo)
+                        
+                        st.write(f"**📁 Archivo:** {archivo.name}")
+                        st.write(f"**📄 Tipo:** Excel ({extension.upper()})")
+                        st.write(f"**📋 Hojas encontradas:** {len(xls.sheet_names)}")
+                        
+                        # Mostrar hojas disponibles
+                        col1, col2 = st.columns(2)
+                        
+                        with col1:
+                            st.write("**Hojas en el archivo:**")
+                            for i, sheet in enumerate(xls.sheet_names, 1):
+                                st.write(f"{i}. {sheet}")
+                        
+                        with col2:
+                            # Verificar hojas requeridas
+                            required_sheets = ["ejecucion_general", "ejecucion_por_zonas", "orden_de_compra", "llamado"]
+                            missing_sheets = []
+                            found_sheets = []
+                            
+                            for req_sheet in required_sheets:
+                                found = any(req_sheet.lower() == sheet.lower() for sheet in xls.sheet_names)
+                                if found:
+                                    found_sheets.append(req_sheet)
+                                else:
+                                    missing_sheets.append(req_sheet)
+                            
+                            st.write("**Estado de hojas requeridas:**")
+                            for sheet in found_sheets:
+                                st.write(f"✅ {sheet}")
+                            for sheet in missing_sheets:
+                                st.write(f"❌ {sheet}")
+                        
+                        # Análisis detallado de cada hoja
+                        hoja_analisis = st.selectbox(
+                            "Seleccionar hoja para análisis detallado:",
+                            options=xls.sheet_names
+                        )
+                        
+                        if hoja_analisis:
+                            # Leer una muestra de la hoja seleccionada
+                            df_sample = pd.read_excel(xls, sheet_name=hoja_analisis, nrows=10)
+                            
+                            st.write(f"**📊 Análisis de la hoja '{hoja_analisis}':**")
+                            
+                            # Información básica
+                            col1, col2, col3 = st.columns(3)
+                            with col1:
+                                st.metric("Total Columnas", len(df_sample.columns))
+                            with col2:
+                                # Leer toda la hoja para contar filas (puede ser lento para archivos grandes)
+                                try:
+                                    df_full = pd.read_excel(xls, sheet_name=hoja_analisis)
+                                    st.metric("Total Filas", len(df_full))
+                                except:
+                                    st.metric("Total Filas", "Error al contar")
+                            with col3:
+                                # Contar columnas vacías
+                                empty_cols = df_sample.isnull().all().sum()
+                                st.metric("Columnas Vacías", empty_cols)
+                            
+                            # Mostrar nombres de columnas
+                            st.write("**Columnas encontradas:**")
+                            cols_text = ", ".join(df_sample.columns.tolist())
+                            st.text_area("Lista de columnas:", value=cols_text, height=100, disabled=True)
+                            
+                            # Mostrar muestra de datos
+                            st.write("**Muestra de datos (primeras 10 filas):**")
+                            st.dataframe(df_sample)
+                            
+                            # Verificar tipos de datos
+                            st.write("**Tipos de datos por columna:**")
+                            tipos_df = pd.DataFrame({
+                                'Columna': df_sample.columns,
+                                'Tipo': df_sample.dtypes.values,
+                                'Valores Nulos': df_sample.isnull().sum().values,
+                                'Valores Únicos': df_sample.nunique().values
+                            })
+                            st.dataframe(tipos_df)
                     
-                    Si la hoja 'llamado' no existe, la aplicación puede generarla automáticamente
-                    a partir de los datos en 'ejecucion_general'.
-                    """)
+                    elif extension == 'csv':
+                        # Análisis para archivos CSV (código similar al anterior)
+                        contenido = archivo.getvalue().decode('utf-8')
+                        df_sample = pd.read_csv(io.StringIO(contenido), nrows=10)
+                        
+                        st.write(f"**📁 Archivo:** {archivo.name}")
+                        st.write(f"**📄 Tipo:** CSV")
+                        
+                        # Información básica
+                        col1, col2, col3 = st.columns(3)
+                        with col1:
+                            st.metric("Total Columnas", len(df_sample.columns))
+                        with col2:
+                            try:
+                                df_full = pd.read_csv(io.StringIO(contenido))
+                                st.metric("Total Filas", len(df_full))
+                            except:
+                                st.metric("Total Filas", "Error al contar")
+                        with col3:
+                            empty_cols = df_sample.isnull().all().sum()
+                            st.metric("Columnas Vacías", empty_cols)
+                        
+                        st.write("**Columnas encontradas:**")
+                        cols_text = ", ".join(df_sample.columns.tolist())
+                        st.text_area("Lista de columnas:", value=cols_text, height=100, disabled=True)
+                        
+                        st.write("**Muestra de datos (primeras 10 filas):**")
+                        st.dataframe(df_sample)
+                    
+                    # Mensaje de estado
+                    if extension in ['xlsx', 'xls'] and 'missing_sheets' in locals() and missing_sheets:
+                        st.warning(f"⚠️ Faltan las siguientes hojas requeridas: {', '.join(missing_sheets)}")
+                        st.info("El sistema puede intentar generar automáticamente algunas hojas faltantes.")
+                    else:
+                        st.success("✅ El archivo parece tener la estructura correcta para ser procesado.")
                 
-                if st.button("Cargar archivo a PostgreSQL"):
-                    with st.spinner("Cargando archivo y creando tablas..."):
-                        try:
-                            result = cargar_archivo(esquema, archivo)
-                            if result:
-                                # Solo guardamos registro si la carga fue exitosa
-                                ubicacion = archivo.name
-                                actualizar_registro(licitacion, empresa, esquema, ubicacion)
-                                st.success("✅ Archivo cargado y tablas creadas correctamente.")
-                                st.balloons()
-                        except Exception as e:
-                            st.error(f"Error al cargar archivo: {str(e)}")
-                            st.info("Consulta el formato esperado del archivo expandiendo la sección 'Formato de archivo esperado'.")
-    else:
-        st.info("Por favor, completa Licitación y Empresa Adjudicada para generar el esquema.")
+                except Exception as e:
+                    st.error(f"Error al analizar el archivo: {str(e)}")
+            
+            # Separador visual
+            st.divider()
+        
+        # BOTONES DEL FORMULARIO - SIEMPRE VISIBLES
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            # Botón para procesar - siempre visible
+            submit = st.form_submit_button("🚀 Procesar y Cargar Archivo", type="primary", disabled=(archivo is None))
+        
+        with col2:
+            # Botón para limpiar - siempre visible
+            limpiar = st.form_submit_button("🗑️ Limpiar Formulario", type="secondary")
+        
+        # Procesar según el botón presionado
+        if limpiar:
+            # Limpiar estado del formulario
+            st.rerun()
+        
+        elif submit:
+            if not archivo:
+                st.error("Por favor, seleccione un archivo Excel o CSV.")
+            elif not id_licitacion or not modalidad or not numero_anio or not nombre_llamado or not empresa_adjudicada or not vigencia_contrato or not numero_contrato:
+                st.error("Por favor, complete todos los campos obligatorios.")
+            else:
+                # Usar el esquema personalizado
+                esquema = esquema_personalizado
+                empresa_para_tablas = empresa_adjudicada.strip().upper().replace(" ", "_")
+                
+                # Crear diccionario con datos del formulario
+                datos_formulario = {
+                    'id_licitacion': id_licitacion,
+                    'modalidad': modalidad,
+                    'numero_anio': numero_anio,
+                    'nombre_llamado': nombre_llamado,
+                    'empresa_adjudicada': empresa_adjudicada,
+                    'ruc': ruc,
+                    'fecha_firma': fecha_firma,
+                    'numero_contrato': numero_contrato,
+                    'vigencia_contrato': vigencia_contrato
+                }
+                
+                # Procesar el archivo con el prefijo de empresa en las tablas
+                with st.spinner("Procesando archivo y creando tablas..."):
+                    success, message = cargar_archivo_a_postgres(
+                        archivo,
+                        archivo.name,
+                        esquema,
+                        empresa_para_tablas,  # Pasar la empresa como parámetro adicional
+                        datos_formulario  # Pasar datos del formulario
+                    )
+                
+                if success:
+                    st.success(f"Archivo cargado correctamente en el esquema '{esquema}' con tablas de empresa '{empresa_para_tablas}'")
+                    st.balloons()
+                else:
+                    st.error(message)
 
 def pagina_ver_cargas():
-    st.header("Listado de archivos cargados")
+    """Página para ver las cargas realizadas"""
+    st.header("Archivos Cargados")
     
-    # Iniciar actualización automática
-    actualizado = iniciar_actualizacion_automatica()
+    col1, col2 = st.columns([1, 3])
     
-    # Mostrar información sobre la última actualización
-    if 'ultima_actualizacion' in st.session_state:
-        tiempo_restante = INTERVALO_ACTUALIZACION - ((datetime.now() - st.session_state.ultima_actualizacion).total_seconds() / 60)
-        if tiempo_restante < 0:
-            tiempo_restante = 0
+    with col1:
+        # Botón para actualizar manualmente
+        if st.button("🔄 Actualizar ahora"):
+            st.rerun()
+    
+    with col2:
+        # Opción para actualización automática
+        auto_refresh = st.checkbox("Actualizar automáticamente cada 1 minuto", value=False)
+    
+    # Mostrar tiempo hasta próxima actualización si está activado
+    if auto_refresh:
+        # Inicializar contador si no existe
+        if 'last_refresh_time' not in st.session_state:
+            st.session_state.last_refresh_time = time.time()
         
-        col1, col2, col3 = st.columns([1, 2, 1])
-        with col2:
-            st.info(f"🕒 Última actualización: {st.session_state.ultima_actualizacion.strftime('%H:%M:%S')} | "
-                   f"Próxima en: {int(tiempo_restante)} minutos")
+        # Calcular tiempo transcurrido
+        current_time = time.time()
+        elapsed = current_time - st.session_state.last_refresh_time
+        remaining = max(60 - elapsed, 0)
         
-        if actualizado:
-            st.success("✅ Base de datos sincronizada automáticamente")
+        # Mostrar barra de progreso para tiempo restante
+        st.progress(elapsed / 60)
+        st.caption(f"Próxima actualización en {int(remaining)} segundos")
+        
+        # Refrescar si ha pasado 1 minuto
+        if elapsed >= 60:
+            st.session_state.last_refresh_time = current_time
+            st.rerun()
     
-    # Botón para sincronización manual
-    if st.button("🔄 Sincronizar ahora con PostgreSQL"):
-        with st.spinner("Sincronizando con PostgreSQL..."):
-            result = sincronizar_csv_con_postgres()
-            if "error" not in result:
-                st.session_state.ultima_actualizacion = datetime.now()
-                if result["esquemas_faltantes"] or result["esquemas_sobrantes"]:
-                    st.success("Base de datos sincronizada correctamente")
-                    if result["esquemas_faltantes"]:
-                        st.info(f"Se añadieron {len(result['esquemas_faltantes'])} esquemas detectados en PostgreSQL")
-                    if result["esquemas_sobrantes"]:
-                        st.warning(f"Se marcaron {len(result['esquemas_sobrantes'])} esquemas que ya no existen en PostgreSQL")
-                else:
-                    st.success("El registro ya estaba sincronizado con PostgreSQL")
+    # Obtener archivos actualizados
+    archivos = obtener_archivos_cargados()
     
-    # Leer el CSV después de posible sincronización
-    df = pd.read_csv(REGISTRO_CSV)
-    if df.empty:
-        st.info("No hay archivos cargados aún.")
-        return
-
-    # Estilizar el dataframe
-    def highlight_missing(val):
-        if '[NO EXISTE EN DB]' in str(val):
-            return 'background-color: #ffcccc'
-        return ''
-    
-    # Mostrar todas las columnas incluyendo UltimaActualizacion
-    st.dataframe(df.style.applymap(highlight_missing, subset=['Ubicacion']))
-
-    esquema_seleccionado = st.selectbox("Selecciona esquema para ver detalles", options=df['Esquema'].unique())
-
-    if esquema_seleccionado:
-        mostrar_tablas_columnas(esquema_seleccionado)
+    if archivos:
+        # Convertir a DataFrame para mejor visualización
+        df_archivos = pd.DataFrame(archivos)
+        
+        # Dar formato a las fechas
+        if 'fecha_carga' in df_archivos.columns:
+            df_archivos['fecha_carga'] = pd.to_datetime(df_archivos['fecha_carga']).dt.strftime('%Y-%m-%d %H:%M')
+        
+        # Colorear estado
+        def colorear_estado(estado):
+            if estado == 'Activo':
+                return 'background-color: #d4edda; color: #155724'
+            elif estado == 'Eliminado':
+                return 'background-color: #f8d7da; color: #721c24'
+            else:
+                return ''
+        
+        # Aplicar estilo condicional
+        df_styled = df_archivos.style.applymap(colorear_estado, subset=['estado'])
+        
+        # Mostrar DataFrame
+        st.dataframe(df_styled)
+        
+        # Ofrecer descarga del contenido original si está activo
+        archivos_activos = [a for a in archivos if a['estado'] == 'Activo']
+        if archivos_activos:
+            archivo_id = st.selectbox(
+                "Seleccionar archivo para descargar contenido original:",
+                options=[f"{a['nombre_archivo']} ({a['esquema']})" for a in archivos_activos],
+                index=None
+            )
+            
+            if archivo_id:
+                archivo_seleccionado = next((a for a in archivos_activos if f"{a['nombre_archivo']} ({a['esquema']})" == archivo_id), None)
+                
+                if archivo_seleccionado:
+                    # Obtener contenido original
+                    with engine.connect() as conn:
+                        query = text("""
+                            SELECT contenido_original
+                            FROM archivos_cargados
+                            WHERE id = :id
+                        """)
+                        
+                        result = conn.execute(query, {'id': archivo_seleccionado['id']})
+                        contenido = result.scalar()
+                        
+                        if contenido:
+                            st.download_button(
+                                label="Descargar archivo original",
+                                data=contenido.encode('utf-8'),
+                                file_name=archivo_seleccionado['nombre_archivo'],
+                                mime="text/csv"
+                            )
+        else:
+            st.info("No hay archivos activos para descargar.")
+    else:
+        st.info("No hay archivos cargados para mostrar.")
 
 def pagina_eliminar_esquemas():
-    st.header("Eliminar Esquemas")
+    """Página para eliminar esquemas (licitaciones)"""
+    st.header("Eliminar Licitaciones")
     
-    # Iniciar actualización automática
-    iniciar_actualizacion_automatica()
+    st.warning("⚠️ Advertencia: Esta operación eliminará permanentemente todos los datos asociados a la licitación seleccionada.")
     
-    # Sincronizar con PostgreSQL antes de mostrar
-    with st.spinner("Verificando esquemas en PostgreSQL..."):
-        sincronizar_csv_con_postgres()
+    # Obtener esquemas existentes
+    esquemas = obtener_esquemas_postgres()
     
-    # Obtener esquemas directamente de PostgreSQL
-    esquemas_postgres = obtener_esquemas_postgres()
-    
-    if not esquemas_postgres:
-        st.info("No hay esquemas disponibles para eliminar en la base de datos.")
-        return
-    
-    # Inicializar variables de estado si no existen
-    if 'confirmar_eliminacion' not in st.session_state:
-        st.session_state.confirmar_eliminacion = False
-    if 'esquema_a_eliminar' not in st.session_state:
-        st.session_state.esquema_a_eliminar = None
-    
-    # Leer el CSV para información adicional
-    df = pd.read_csv(REGISTRO_CSV)
-    
-    # Crear tabla con estado de esquemas
-    datos_esquemas = []
-    for esquema in esquemas_postgres:
-        info = obtener_info_esquema(esquema)
-        datos_esquemas.append({
-            "Esquema": esquema,
-            "Licitación": info["Licitacion"],
-            "Empresa": info["Empresa"],
-            "Cargado": info["Cargado"],
-            "Estado": "En PostgreSQL y CSV" if esquema in df['Esquema'].values else "Solo en PostgreSQL"
-        })
-    
-    # Mostrar tabla de esquemas
-    st.subheader("Esquemas en PostgreSQL")
-    
-    # Mostrar datos como DataFrame
-    df_esquemas = pd.DataFrame(datos_esquemas)
-    
-    # Función para destacar filas según estado
-    def highlight_estado(val):
-        if val == "Solo en PostgreSQL":
-            return 'background-color: #ffffcc'
-        return ''
-    
-    st.dataframe(df_esquemas.style.applymap(highlight_estado, subset=['Estado']))
-    
-    # Selector de esquema a eliminar
-    esquema_seleccionado = st.selectbox(
-        "Selecciona el esquema que deseas eliminar:",
-        options=esquemas_postgres
-    )
-    
-    # Mostrar información del esquema seleccionado
-    if esquema_seleccionado:
-        st.subheader("Detalles del esquema seleccionado")
-        info_esquema = obtener_info_esquema(esquema_seleccionado)
+    if esquemas:
+        esquema_a_eliminar = st.selectbox(
+            "Seleccionar licitación a eliminar:",
+            options=esquemas
+        )
         
-        col1, col2 = st.columns(2)
+        if st.button("Eliminar Licitación", type="primary", use_container_width=True):
+            # Pedir confirmación
+            if st.checkbox("Confirmo que deseo eliminar esta licitación permanentemente"):
+                success, message = eliminar_esquema_postgres(esquema_a_eliminar)
+                
+                if success:
+                    st.success(message)
+                    time.sleep(2)
+                    st.rerun()
+                else:
+                    st.error(message)
+            else:
+                st.warning("Debe confirmar la eliminación")
+    else:
+        st.info("No hay licitaciones para eliminar.")
+
+def pagina_gestionar_proveedores():
+    """Página para gestionar proveedores"""
+    st.header("Gestión de Proveedores")
+    
+    # Pestañas para diferentes funciones
+    tab1, tab2, tab3 = st.tabs(["Lista de Proveedores", "Nuevo Proveedor", "Importar CSV"])
+    
+    with tab1:
+        st.subheader("Proveedores Registrados")
+        
+        # Filtros
+        col1, col2, col3 = st.columns(3)
         with col1:
-            st.write(f"**Licitación:** {info_esquema['Licitacion']}")
-            st.write(f"**Empresa:** {info_esquema['Empresa']}")
+            filtro_ruc = st.text_input("🔍 Filtrar por RUC:", placeholder="Ej: 80026564")
         with col2:
-            st.write(f"**Archivo:** {info_esquema['Ubicacion']}")
-            st.write(f"**Cargado:** {info_esquema['Cargado']}")
+            filtro_nombre = st.text_input("🔍 Filtrar por Razón Social:", placeholder="Ej: CHACO")
+        with col3:
+            mostrar_inactivos = st.checkbox("Mostrar inactivos", value=False)
         
-        # Mostrar estructura del esquema
-        with st.expander("Ver estructura del esquema en la base de datos"):
-            mostrar_tablas_columnas(esquema_seleccionado)
+        # Obtener proveedores con filtros
+        try:
+            with engine.connect() as conn:
+                query_base = """
+                    SELECT id, ruc, razon_social, direccion, correo_electronico, 
+                           telefono, contacto_nombre, activo, fecha_registro, fecha_actualizacion
+                    FROM reactivos_py.proveedores
+                    WHERE 1=1
+                """
+                params = {}
+                
+                if filtro_ruc:
+                    query_base += " AND ruc ILIKE :ruc"
+                    params['ruc'] = f"%{filtro_ruc}%"
+                
+                if filtro_nombre:
+                    query_base += " AND razon_social ILIKE :nombre"
+                    params['nombre'] = f"%{filtro_nombre}%"
+                
+                if not mostrar_inactivos:
+                    query_base += " AND activo = TRUE"
+                
+                query_base += " ORDER BY razon_social"
+                
+                query = text(query_base)
+                result = conn.execute(query, params)
+                
+                proveedores = []
+                for row in result:
+                    proveedores.append({
+                        'id': row[0],
+                        'ruc': row[1],
+                        'razon_social': row[2],
+                        'direccion': row[3] or 'No especificada',
+                        'correo_electronico': row[4] or 'No especificado',
+                        'telefono': row[5] or 'No especificado',
+                        'contacto_nombre': row[6] or 'No especificado',
+                        'activo': '✅ Activo' if row[7] else '❌ Inactivo',
+                        'fecha_registro': row[8],
+                        'fecha_actualizacion': row[9]
+                    })
+                
+                if proveedores:
+                    # Convertir a DataFrame para mejor visualización
+                    df_proveedores = pd.DataFrame(proveedores)
+                    
+                    # Dar formato a las fechas
+                    if 'fecha_registro' in df_proveedores.columns:
+                        df_proveedores['fecha_registro'] = pd.to_datetime(df_proveedores['fecha_registro']).dt.strftime('%Y-%m-%d')
+                    if 'fecha_actualizacion' in df_proveedores.columns:
+                        df_proveedores['fecha_actualizacion'] = pd.to_datetime(df_proveedores['fecha_actualizacion']).dt.strftime('%Y-%m-%d %H:%M')
+                    
+                    # Mostrar proveedores
+                    st.dataframe(df_proveedores, use_container_width=True)
+                    
+                    # NUEVA SECCIÓN: Editar Proveedor
+                    st.divider()
+                    st.subheader("✏️ Editar Datos de Proveedor")
+                    
+                    # Selector de proveedor para editar
+                    proveedor_options = [f"{p['ruc']} - {p['razon_social']}" for p in proveedores]
+                    proveedor_seleccionado = st.selectbox(
+                        "Seleccionar proveedor para editar:",
+                        options=["Seleccionar..."] + proveedor_options
+                    )
+                    
+                    if proveedor_seleccionado != "Seleccionar...":
+                        # Encontrar el proveedor seleccionado
+                        ruc_seleccionado = proveedor_seleccionado.split(" - ")[0]
+                        proveedor = next((p for p in proveedores if p['ruc'] == ruc_seleccionado), None)
+                        
+                        if proveedor:
+                            with st.form("editar_proveedor_form"):
+                                st.write(f"**Editando:** {proveedor['razon_social']} ({proveedor['ruc']})")
+                                
+                                col1, col2 = st.columns(2)
+                                with col1:
+                                    nuevo_ruc = st.text_input("RUC:", value=proveedor['ruc'])
+                                    nueva_razon = st.text_input("Razón Social:", value=proveedor['razon_social'])
+                                    nueva_direccion = st.text_area("Dirección:", value=proveedor['direccion'] if proveedor['direccion'] != 'No especificada' else '')
+                                
+                                with col2:
+                                    nuevo_correo = st.text_input("Correo Electrónico:", value=proveedor['correo_electronico'] if proveedor['correo_electronico'] != 'No especificado' else '')
+                                    nuevo_telefono = st.text_input("Teléfono:", value=proveedor['telefono'] if proveedor['telefono'] != 'No especificado' else '')
+                                    nuevo_contacto = st.text_input("Nombre de Contacto:", value=proveedor['contacto_nombre'] if proveedor['contacto_nombre'] != 'No especificado' else '')
+                                
+                                # Estado activo/inactivo
+                                activo_actual = proveedor['activo'] == '✅ Activo'
+                                activo = st.checkbox("Proveedor activo", value=activo_actual)
+                                
+                                observaciones = st.text_area("Observaciones:")
+                                
+                                col_btn1, col_btn2 = st.columns(2)
+                                with col_btn1:
+                                    actualizar = st.form_submit_button("💾 Actualizar Proveedor", type="primary")
+                                with col_btn2:
+                                    cambiar_estado = st.form_submit_button("🔄 Cambiar Estado", type="secondary")
+                                
+                                if actualizar:
+                                    try:
+                                        with engine.connect() as conn:
+                                            # Verificar si el RUC ya existe en otro proveedor
+                                            if nuevo_ruc != proveedor['ruc']:
+                                                query_check = text("""
+                                                    SELECT COUNT(*) FROM reactivos_py.proveedores
+                                                    WHERE ruc = :ruc AND id != :id
+                                                """)
+                                                result_check = conn.execute(query_check, {
+                                                    'ruc': nuevo_ruc,
+                                                    'id': proveedor['id']
+                                                })
+                                                count = result_check.scalar()
+                                                
+                                                if count > 0:
+                                                    st.error(f"El RUC '{nuevo_ruc}' ya está registrado para otro proveedor.")
+                                                    return
+                                            
+                                            # Actualizar proveedor
+                                            query = text("""
+                                                UPDATE reactivos_py.proveedores
+                                                SET ruc = :ruc, razon_social = :razon_social, direccion = :direccion,
+                                                    correo_electronico = :correo, telefono = :telefono,
+                                                    contacto_nombre = :contacto, observaciones = :observaciones,
+                                                    activo = :activo
+                                                WHERE id = :id
+                                            """)
+                                            
+                                            conn.execute(query, {
+                                                'ruc': nuevo_ruc,
+                                                'razon_social': nueva_razon,
+                                                'direccion': nueva_direccion or None,
+                                                'correo': nuevo_correo or None,
+                                                'telefono': nuevo_telefono or None,
+                                                'contacto': nuevo_contacto or None,
+                                                'observaciones': observaciones,
+                                                'activo': activo,
+                                                'id': proveedor['id']
+                                            })
+                                            
+                                            st.success(f"✅ Proveedor {nueva_razon} actualizado correctamente")
+                                            time.sleep(1)
+                                            st.rerun()
+                                    except Exception as e:
+                                        st.error(f"Error al actualizar proveedor: {e}")
+                                
+                                if cambiar_estado:
+                                    try:
+                                        nuevo_estado = not activo_actual
+                                        estado_texto = "activo" if nuevo_estado else "inactivo"
+                                        
+                                        with engine.connect() as conn:
+                                            query = text("""
+                                                UPDATE reactivos_py.proveedores
+                                                SET activo = :activo
+                                                WHERE id = :id
+                                            """)
+                                            
+                                            conn.execute(query, {
+                                                'activo': nuevo_estado,
+                                                'id': proveedor['id']
+                                            })
+                                            
+                                            st.success(f"✅ Proveedor {proveedor['razon_social']} marcado como {estado_texto}")
+                                            time.sleep(1)
+                                            st.rerun()
+                                    except Exception as e:
+                                        st.error(f"Error al cambiar estado del proveedor: {e}")
+                else:
+                    st.info("No hay proveedores registrados que coincidan con los filtros.")
+        except Exception as e:
+            st.error(f"Error al obtener proveedores: {e}")
+    
+    with tab2:
+        st.subheader("Registrar Nuevo Proveedor")
         
-        # Primer botón de eliminación
-        if not st.session_state.confirmar_eliminacion:
-            if st.button("Eliminar este esquema"):
-                st.session_state.confirmar_eliminacion = True
-                st.session_state.esquema_a_eliminar = esquema_seleccionado
-                st.rerun()  # Cambiado de experimental_rerun() a rerun()
-        
-        # Confirmación doble de eliminación
-        if st.session_state.confirmar_eliminacion and st.session_state.esquema_a_eliminar == esquema_seleccionado:
-            st.warning(f"⚠️ ¿Estás seguro que deseas eliminar el esquema '{esquema_seleccionado}'?")
-            st.warning("⚠️ Esta acción eliminará permanentemente todas las tablas y datos asociados.")
-            
+        with st.form("nuevo_proveedor_form"):
             col1, col2 = st.columns(2)
+            
             with col1:
-                if st.button("❌ Cancelar", key="btn_cancelar"):
-                    st.session_state.confirmar_eliminacion = False
-                    st.session_state.esquema_a_eliminar = None
-                    st.rerun()  # Cambiado de experimental_rerun() a rerun()
+                ruc_proveedor = st.text_input("RUC: *", placeholder="Ej: 80026564-5")
+                razon_social = st.text_input("Razón Social: *", placeholder="Ej: EMPRESA S.A.")
+                direccion = st.text_area("Dirección:", placeholder="Dirección completa")
             
             with col2:
-                if st.button("✅ Confirmar eliminación", key="btn_confirmar"):
-                    if eliminar_esquema(esquema_seleccionado):
-                        st.success(f"✅ El esquema '{esquema_seleccionado}' ha sido eliminado correctamente")
-                        st.session_state.confirmar_eliminacion = False
-                        st.session_state.esquema_a_eliminar = None
-                        # Esperar un momento para que el usuario vea el mensaje
-                        st.balloons()
-                        # Recargar la página para actualizar la lista
-                        st.rerun()  # Cambiado de experimental_rerun() a rerun()
+                correo_electronico = st.text_input("Correo Electrónico:", placeholder="contacto@empresa.com")
+                telefono = st.text_input("Teléfono:", placeholder="021-123456")
+                contacto_nombre = st.text_input("Nombre de Contacto:", placeholder="Juan Pérez")
+            
+            observaciones = st.text_area("Observaciones:", placeholder="Información adicional...")
+            
+            submit = st.form_submit_button("📝 Registrar Proveedor", type="primary")
+            
+            if submit:
+                if not ruc_proveedor or not razon_social:
+                    st.error("Por favor, complete los campos obligatorios (RUC y Razón Social).")
+                else:
+                    try:
+                        # Verificar si el RUC ya existe
+                        with engine.connect() as conn:
+                            query = text("SELECT COUNT(*) FROM reactivos_py.proveedores WHERE ruc = :ruc")
+                            result = conn.execute(query, {'ruc': ruc_proveedor})
+                            count = result.scalar()
+                            
+                            if count > 0:
+                                st.error(f"El RUC '{ruc_proveedor}' ya está registrado.")
+                            else:
+                                # Registrar nuevo proveedor
+                                query = text("""
+                                    INSERT INTO reactivos_py.proveedores 
+                                    (ruc, razon_social, direccion, correo_electronico, telefono, contacto_nombre, observaciones)
+                                    VALUES (:ruc, :razon_social, :direccion, :correo, :telefono, :contacto, :observaciones)
+                                """)
+                                
+                                conn.execute(query, {
+                                    'ruc': ruc_proveedor,
+                                    'razon_social': razon_social,
+                                    'direccion': direccion,
+                                    'correo': correo_electronico,
+                                    'telefono': telefono,
+                                    'contacto': contacto_nombre,
+                                    'observaciones': observaciones
+                                })
+                                
+                                st.success(f"Proveedor '{razon_social}' registrado exitosamente")
+                                time.sleep(1)
+                                st.rerun()
+                    except Exception as e:
+                        st.error(f"Error al registrar proveedor: {e}")
+    
+    with tab3:
+        st.subheader("Importar Proveedores desde CSV")
+        
+        st.info("""
+        📋 **Formato esperado del CSV:**
+        - Columna 1: RUC
+        - Columna 2: Razón Social
+        - Columna 3: Dirección (opcional)
+        - Columna 4: Correo Electrónico (opcional)
+        """)
+        
+        archivo_csv = st.file_uploader("Seleccionar archivo CSV:", type=["csv"])
+        
+        if archivo_csv is not None:
+            st.write(f"**Archivo seleccionado:** {archivo_csv.name}")
+            st.write(f"**Tamaño:** {archivo_csv.size} bytes")
+            
+            # Botón para analizar archivo
+            if st.button("🔍 Analizar Archivo"):
+                try:
+                    # Intentar diferentes delimitadores y encodings
+                    delimitadores = [',', ';', '\t', '|']
+                    encodings = ['utf-8', 'latin-1', 'cp1252', 'iso-8859-1']
+                    
+                    df = None
+                    delimiter_usado = None
+                    encoding_usado = None
+                    
+                    # Mostrar información de debug
+                    st.write("**Intentando leer el archivo...**")
+                    
+                    # Probar diferentes combinaciones
+                    for encoding in encodings:
+                        for delimiter in delimitadores:
+                            try:
+                                # Resetear el archivo
+                                archivo_csv.seek(0)
+                                
+                                # Intentar leer con parámetros robustos
+                                df = pd.read_csv(
+                                    archivo_csv, 
+                                    delimiter=delimiter,
+                                    encoding=encoding,
+                                    quotechar='"',
+                                    skipinitialspace=True,
+                                    on_bad_lines='skip',
+                                    engine='python',
+                                    nrows=50
+                                )
+                                
+                                # Si llegamos aquí, funcionó
+                                delimiter_usado = delimiter
+                                encoding_usado = encoding
+                                st.success(f"✅ Archivo leído correctamente (Delimitador: '{delimiter_usado}', Encoding: {encoding_usado})")
+                                break
+                            except Exception:
+                                continue
+                        
+                        if df is not None:
+                            break
+                    
+                    if df is None:
+                        st.error("❌ No se pudo leer el archivo con ningún formato estándar.")
+                        return
+                    
+                    # Limpiar DataFrame
+                    df = df.dropna(how='all')
+                    df = df.fillna('')
+                    
+                    # Mostrar información del DataFrame
+                    st.write(f"**Columnas encontradas:** {df.shape[1]}")
+                    st.write(f"**Filas encontradas:** {df.shape[0]}")
+                    st.write(f"**Nombres de columnas:** {list(df.columns)}")
+                    
+                    st.write("**Vista previa del archivo:**")
+                    st.dataframe(df.head(10))
+                    
+                    # Verificar si tiene al menos 2 columnas
+                    if len(df.columns) < 2:
+                        st.error(f"❌ El archivo tiene solo {len(df.columns)} columna(s). Se necesitan al menos 2 columnas (RUC y Razón Social)")
+                        return
+                    
+                    # Si llegamos aquí, el archivo es válido para procesamiento
+                    st.success("✅ Archivo válido para importación")
+                    
+                    # Guardar DataFrame en session_state
+                    st.session_state.df_importar = df
+                    st.session_state.delimiter_usado = delimiter_usado
+                    st.session_state.encoding_usado = encoding_usado
+                    
+                except Exception as e:
+                    st.error(f"❌ Error al procesar el archivo: {e}")
+            
+            # Mostrar sección de mapeo solo si el DataFrame está disponible
+            if 'df_importar' in st.session_state:
+                df = st.session_state.df_importar
+                
+                st.divider()
+                st.subheader("Mapeo de Columnas")
+                
+                # Mapear columnas
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    col_ruc = st.selectbox("Columna RUC:", options=df.columns.tolist(), index=0)
+                    col_razon = st.selectbox("Columna Razón Social:", options=df.columns.tolist(), index=1 if len(df.columns) > 1 else 0)
+                
+                with col2:
+                    col_direccion = st.selectbox("Columna Dirección (opcional):", options=["No mapear"] + df.columns.tolist())
+                    col_correo = st.selectbox("Columna Correo (opcional):", options=["No mapear"] + df.columns.tolist())
+                
+                # Vista previa de mapeo
+                st.write("**Vista previa del mapeo:**")
+                preview_data = []
+                for i in range(min(3, len(df))):
+                    preview_data.append({
+                        'RUC': df.iloc[i][col_ruc],
+                        'Razón Social': df.iloc[i][col_razon],
+                        'Dirección': df.iloc[i][col_direccion] if col_direccion != "No mapear" else "No mapeado",
+                        'Correo': df.iloc[i][col_correo] if col_correo != "No mapear" else "No mapeado"
+                    })
+                
+                st.dataframe(pd.DataFrame(preview_data))
+                
+                # Botón de importación
+                st.divider()
+                if st.button("🚀 Importar Proveedores", type="primary"):
+                    try:
+                        insertados = 0
+                        errores = 0
+                        
+                        for index, row in df.iterrows():
+                            try:
+                                # Solo procesar las primeras 3 filas para debug
+                                if index >= 3:
+                                    break
+                                
+                                ruc = str(row[col_ruc]).strip()
+                                razon_social = str(row[col_razon]).strip()
+                                direccion = str(row[col_direccion]).strip() if col_direccion != "No mapear" and pd.notna(row[col_direccion]) else None
+                                correo = str(row[col_correo]).strip() if col_correo != "No mapear" and pd.notna(row[col_correo]) else None
+                                
+                                # Validar datos mínimos
+                                if not ruc or not razon_social or ruc.lower() == "nan" or razon_social.lower() == "nan":
+                                    st.error(f"Fila {index + 1}: RUC o Razón Social vacíos")
+                                    errores += 1
+                                    continue
+                                
+                                # Insertar en base de datos con commit explícito
+                                with engine.connect() as conn:
+                                    trans = conn.begin()
+                                    try:
+                                        query = text("""
+                                            INSERT INTO reactivos_py.proveedores (ruc, razon_social, direccion, correo_electronico)
+                                            VALUES (:ruc, :razon_social, :direccion, :correo)
+                                        """)
+                                        
+                                        conn.execute(query, {
+                                            'ruc': ruc,
+                                            'razon_social': razon_social,
+                                            'direccion': direccion,
+                                            'correo': correo
+                                        })
+                                        
+                                        trans.commit()
+                                        st.success(f"Fila {index + 1}: Insertado correctamente - {ruc} | {razon_social}")
+                                        insertados += 1
+                                        
+                                    except Exception as e:
+                                        trans.rollback()
+                                        st.error(f"Fila {index + 1}: Error - {str(e)}")
+                                        errores += 1
+                            
+                            except Exception as e:
+                                st.error(f"Fila {index + 1}: Error general - {str(e)}")
+                                errores += 1
+                        
+                        # Verificar inmediatamente después de la inserción
+                        st.write("**Verificación inmediata:**")
+                        try:
+                            with engine.connect() as conn:
+                                query = text("SELECT COUNT(*) FROM reactivos_py.proveedores")
+                                result = conn.execute(query)
+                                count = result.scalar()
+                                st.write(f"Total de registros en la tabla: {count}")
+                                
+                                # Mostrar los últimos registros insertados
+                                query = text("""
+                                    SELECT ruc, razon_social, fecha_registro 
+                                    FROM reactivos_py.proveedores 
+                                    ORDER BY fecha_registro DESC 
+                                    LIMIT 5
+                                """)
+                                result = conn.execute(query)
+                                
+                                st.write("**Últimos registros:**")
+                                for row in result:
+                                    st.write(f"- {row[0]} | {row[1]} | {row[2]}")
+                                    
+                        except Exception as e:
+                            st.error(f"Error verificando datos: {e}")
+                        
+                        # Mostrar resultados
+                        st.success(f"✅ Importación completada: {insertados} registros insertados, {errores} errores")
+                        
+                        # Limpiar session state
+                        if 'df_importar' in st.session_state:
+                            del st.session_state.df_importar
+                            del st.session_state.delimiter_usado
+                            del st.session_state.encoding_usado
+                        
+                    except Exception as e:
+                        st.error(f"Error durante la importación: {e}")
+
+def pagina_administrar_usuarios():
+    """Página para administrar usuarios"""
+    st.header("Administrar Usuarios")
+    
+    # Pestañas para diferentes funciones
+    tab1, tab2 = st.tabs(["Lista de Usuarios", "Crear Usuario"])
+    
+    with tab1:
+        st.subheader("Usuarios del Sistema")
+        
+        # Obtener usuarios
+        try:
+            with engine.connect() as conn:
+                query = text("""
+                    SELECT id, cedula, username, nombre_completo, role, fecha_creacion, ultimo_cambio_password
+                    FROM reactivos_py.usuarios
+                    ORDER BY username
+                """)
+                
+                result = conn.execute(query)
+                
+                usuarios = []
+                for row in result:
+                    usuarios.append({
+                        'id': row[0],
+                        'cedula': row[1],
+                        'username': row[2],
+                        'nombre': row[3],
+                        'rol': row[4],
+                        'fecha_creacion': row[5],
+                        'ultimo_cambio_password': row[6]
+                    })
+                
+                if usuarios:
+                    # Convertir a DataFrame para mejor visualización
+                    df_usuarios = pd.DataFrame(usuarios)
+                    
+                    # Dar formato a las fechas
+                    if 'fecha_creacion' in df_usuarios.columns:
+                        df_usuarios['fecha_creacion'] = pd.to_datetime(df_usuarios['fecha_creacion']).dt.strftime('%Y-%m-%d %H:%M')
+                    if 'ultimo_cambio_password' in df_usuarios.columns:
+                        df_usuarios['ultimo_cambio_password'] = pd.to_datetime(df_usuarios['ultimo_cambio_password']).dt.strftime('%Y-%m-%d %H:%M')
+                    
+                    # Mostrar usuarios
+                    st.dataframe(df_usuarios)
+                    
+                    # Selector para editar usuario
+                    usuario_a_editar = st.selectbox(
+                        "Seleccionar usuario para editar:",
+                        options=[u['username'] for u in usuarios]
+                    )
+                    
+                    usuario = next((u for u in usuarios if u['username'] == usuario_a_editar), None)
+                    
+                    if usuario:
+                        with st.form("editar_usuario_form"):
+                            st.subheader(f"Editar Usuario: {usuario['username']}")
+                            
+                            # Campos para editar
+                            cedula = st.text_input("Cédula de Identidad:", value=usuario['cedula'])
+                            nombre = st.text_input("Nombre completo:", value=usuario['nombre'])
+                            rol = st.selectbox(
+                                "Rol:",
+                                options=["admin", "user"],
+                                index=0 if usuario['rol'] == "admin" else 1
+                            )
+                            reset_password = st.checkbox("Resetear contraseña")
+                            new_password = st.text_input("Nueva contraseña:", type="password") if reset_password else None
+                            
+                            # Botón para actualizar
+                            submit = st.form_submit_button("Actualizar Usuario")
+                            
+                            if submit:
+                                try:
+                                    with engine.connect() as conn:
+                                        # Iniciar transacción
+                                        trans = conn.begin()
+                                        try:
+                                            # Verificar si la cédula ya existe en otro usuario
+                                            if cedula != usuario['cedula']:
+                                                query_check = text("""
+                                                    SELECT COUNT(*) FROM reactivos_py.usuarios
+                                                    WHERE cedula = :cedula AND id != :id
+                                                """)
+                                                result_check = conn.execute(query_check, {
+                                                    'cedula': cedula,
+                                                    'id': usuario['id']
+                                                })
+                                                count = result_check.scalar()
+                                                
+                                                if count > 0:
+                                                    st.error(f"La cédula '{cedula}' ya está asignada a otro usuario.")
+                                                    trans.rollback()
+                                                    return
+                                            
+                                            # Actualizar usuario
+                                            if reset_password and new_password:
+                                                # Actualizar con nueva contraseña
+                                                password_hash = hashlib.sha256(new_password.encode()).hexdigest()
+                                                
+                                                query = text("""
+                                                    UPDATE reactivos_py.usuarios
+                                                    SET cedula = :cedula, nombre_completo = :nombre, role = :rol, 
+                                                        password = :password, ultimo_cambio_password = CURRENT_TIMESTAMP
+                                                    WHERE id = :id
+                                                """)
+                                                
+                                                conn.execute(query, {
+                                                    'cedula': cedula,
+                                                    'nombre': nombre,
+                                                    'rol': rol,
+                                                    'password': password_hash,
+                                                    'id': usuario['id']
+                                                })
+                                            else:
+                                                # Actualizar sin cambiar contraseña
+                                                query = text("""
+                                                    UPDATE reactivos_py.usuarios
+                                                    SET cedula = :cedula, nombre_completo = :nombre, role = :rol
+                                                    WHERE id = :id
+                                                """)
+                                                
+                                                conn.execute(query, {
+                                                    'cedula': cedula,
+                                                    'nombre': nombre,
+                                                    'rol': rol,
+                                                    'id': usuario['id']
+                                                })
+                                            
+                                            # Confirmar transacción
+                                            trans.commit()
+                                            
+                                            st.success(f"Usuario {usuario['username']} actualizado correctamente")
+                                            time.sleep(1)
+                                            st.rerun()
+                                            
+                                        except Exception as e:
+                                            # Revertir transacción en caso de error
+                                            trans.rollback()
+                                            raise e
+                                            
+                                except Exception as e:
+                                    st.error(f"Error al actualizar usuario: {e}")
+                else:
+                    st.info("No hay usuarios para mostrar.")
+        except Exception as e:
+            st.error(f"Error al obtener usuarios: {e}")
+    
+    with tab2:
+        st.subheader("Crear Nuevo Usuario")
+        
+        with st.form("nuevo_usuario_form"):
+            cedula = st.text_input("Cédula de Identidad:")
+            username = st.text_input("Nombre de usuario:")
+            password = st.text_input("Contraseña:", type="password")
+            nombre = st.text_input("Nombre completo:")
+            rol = st.selectbox(
+                "Rol:",
+                options=["user", "admin"]
+            )
+            requiere_cambio = st.checkbox("Requerir cambio de contraseña en próximo inicio de sesión", value=True)
+            
+            submit = st.form_submit_button("Crear Usuario")
+            
+            if submit:
+                if not cedula or not username or not password or not nombre:
+                    st.error("Por favor, complete todos los campos.")
+                else:
+                    try:
+                        # Verificar si el usuario o cédula ya existen
+                        with engine.connect() as conn:
+                            query = text("""
+                                SELECT 
+                                    (SELECT COUNT(*) FROM reactivos_py.usuarios WHERE username = :username) as count_username,
+                                    (SELECT COUNT(*) FROM reactivos_py.usuarios WHERE cedula = :cedula) as count_cedula
+                            """)
+                            result = conn.execute(query, {'username': username, 'cedula': cedula})
+                            counts = result.fetchone()
+                            
+                            if counts[0] > 0:
+                                st.error(f"El nombre de usuario '{username}' ya existe.")
+                            elif counts[1] > 0:
+                                st.error(f"La cédula '{cedula}' ya está registrada.")
+                            else:
+                                # Crear nuevo usuario
+                                password_hash = hashlib.sha256(password.encode()).hexdigest()
+                                
+                                query = text("""
+                                    INSERT INTO reactivos_py.usuarios 
+                                    (cedula, username, password, nombre_completo, role, ultimo_cambio_password)
+                                    VALUES (:cedula, :username, :password, :nombre, :rol, 
+                                           CASE WHEN :requiere_cambio THEN NULL ELSE CURRENT_TIMESTAMP END)
+                                """)
+                                
+                                conn.execute(query, {
+                                    'cedula': cedula,
+                                    'username': username,
+                                    'password': password_hash,
+                                    'nombre': nombre,
+                                    'rol': rol,
+                                    'requiere_cambio': requiere_cambio
+                                })
+                                
+                                st.success(f"Usuario '{username}' creado exitosamente")
+                                time.sleep(1)
+                                st.rerun()
+                    except Exception as e:
+                        st.error(f"Error al crear usuario: {e}")
+
+
+def pagina_cambiar_password():
+    """Página para cambiar contraseña del usuario actual"""
+    st.header("Cambiar Contraseña")
+    
+    # Verificar si el usuario debe cambiar su contraseña
+    with engine.connect() as conn:
+        query = text("""
+            SELECT ultimo_cambio_password 
+            FROM usuarios 
+            WHERE id = :user_id
+        """)
+        
+        result = conn.execute(query, {'user_id': st.session_state.user_id})
+        ultimo_cambio = result.scalar()
+        
+        if ultimo_cambio is None:
+            st.warning("⚠️ Se requiere cambiar su contraseña. Por favor, establezca una nueva contraseña para continuar.")
+    
+    with st.form("cambiar_password_form"):
+        password_actual = st.text_input("Contraseña actual:", type="password")
+        password_nueva = st.text_input("Nueva contraseña:", type="password")
+        password_confirmar = st.text_input("Confirmar nueva contraseña:", type="password")
+        
+        # Agregar reglas de validación para contraseñas
+        if password_nueva:
+            col1, col2 = st.columns(2)
+            with col1:
+                if len(password_nueva) >= 8:
+                    st.success("✅ Mínimo 8 caracteres")
+                else:
+                    st.error("❌ Mínimo 8 caracteres")
+            
+            with col2:
+                if any(c.isdigit() for c in password_nueva):
+                    st.success("✅ Al menos un número")
+                else:
+                    st.error("❌ Al menos un número")
+        
+        submit = st.form_submit_button("Cambiar Contraseña")
+        
+        if submit:
+            if not password_actual or not password_nueva or not password_confirmar:
+                st.error("Por favor, complete todos los campos.")
+            elif password_nueva != password_confirmar:
+                st.error("Las contraseñas no coinciden.")
+            elif len(password_nueva) < 8:
+                st.error("La contraseña debe tener al menos 8 caracteres.")
+            elif not any(c.isdigit() for c in password_nueva):
+                st.error("La contraseña debe contener al menos un número.")
+            else:
+                try:
+                    # Verificar contraseña actual
+                    password_hash_actual = hashlib.sha256(password_actual.encode()).hexdigest()
+                    
+                    with engine.connect() as conn:
+                        query = text("""
+                            SELECT COUNT(*) 
+                            FROM usuarios 
+                            WHERE id = :user_id AND password = :password
+                        """)
+                        
+                        result = conn.execute(query, {
+                            'user_id': st.session_state.user_id,
+                            'password': password_hash_actual
+                        })
+                        
+                        count = result.scalar()
+                        
+                        if count == 0:
+                            st.error("La contraseña actual es incorrecta.")
+                        else:
+                            # Actualizar contraseña
+                            password_hash_nueva = hashlib.sha256(password_nueva.encode()).hexdigest()
+                            
+                            query = text("""
+                                UPDATE usuarios
+                                SET password = :password, ultimo_cambio_password = CURRENT_TIMESTAMP
+                                WHERE id = :user_id
+                            """)
+                            
+                            conn.execute(query, {
+                                'password': password_hash_nueva,
+                                'user_id': st.session_state.user_id
+                            })
+                            
+                            st.success("Contraseña cambiada exitosamente.")
+                            
+                            # Si se requería cambio de contraseña, actualizar el estado de la sesión
+                            if 'requiere_cambio_password' in st.session_state and st.session_state.requiere_cambio_password:
+                                st.session_state.requiere_cambio_password = False
+                                st.info("Ya puede acceder a todas las funcionalidades del sistema.")
+                                time.sleep(2)
+                                st.rerun()
+                except Exception as e:
+                    st.error(f"Error al cambiar contraseña: {e}")
+
+def obtener_datos_items(esquema, servicio=None):
+    """Obtiene los datos de los items disponibles para generar órdenes de compra"""
+    try:
+        with engine.connect() as conn:
+            # Consulta para obtener items disponibles
+            query = text(f"""
+                SELECT 
+                    z."LOTE",
+                    z."ITEM",
+                    z."CODIGO DE REACTIVOS / INSUMOS",
+                    z."CODIGO PARA SERVICIO BENEFICIARIO",
+                    z."SERVICIO BENEFICIARIO",
+                    z."DESCRIPCION DEL PRODUCTO // MARCA // PROCEDENCIA",
+                    z."UNIDAD DE MEDIDA",
+                    z."PRECIO UNITARIO",
+                    z."REDISTRIBUCION (CANTIDAD MAXIMA)",
+                    z."CANTIDAD EMITIDA",
+                    z."SALDO A EMITIR"
+                FROM "{esquema}"."ejecucion_por_zonas" z
+                WHERE z."SALDO A EMITIR" > 0
+            """)
+            
+            # Si se especifica un servicio, filtrar por ese servicio
+            if servicio:
+                query = text(f"""
+                    SELECT 
+                        z."LOTE",
+                        z."ITEM",
+                        z."CODIGO DE REACTIVOS / INSUMOS",
+                        z."CODIGO PARA SERVICIO BENEFICIARIO",
+                        z."SERVICIO BENEFICIARIO",
+                        z."DESCRIPCION DEL PRODUCTO // MARCA // PROCEDENCIA",
+                        z."UNIDAD DE MEDIDA",
+                        z."PRECIO UNITARIO",
+                        z."REDISTRIBUCION (CANTIDAD MAXIMA)",
+                        z."CANTIDAD EMITIDA",
+                        z."SALDO A EMITIR"
+                    FROM "{esquema}"."ejecucion_por_zonas" z
+                    WHERE z."SALDO A EMITIR" > 0
+                    AND z."SERVICIO BENEFICIARIO" = :servicio
+                """)
+                result = conn.execute(query, {'servicio': servicio})
+            else:
+                result = conn.execute(query)
+                
+            items = []
+            for row in result:
+                items.append({
+                    'lote': row[0],
+                    'item': row[1],
+                    'codigo_insumo': row[2],
+                    'codigo_servicio': row[3],
+                    'servicio': row[4],
+                    'descripcion': row[5],
+                    'unidad_medida': row[6],
+                    'precio_unitario': row[7],
+                    'cantidad_maxima': row[8],
+                    'cantidad_emitida': row[9],
+                    'saldo_emitir': row[10]
+                })
+            
+            return items
+    except Exception as e:
+        st.error(f"Error obteniendo datos de items: {e}")
+        return []
+
+def obtener_servicios_beneficiarios(esquema):
+    """Obtiene la lista de servicios beneficiarios para un esquema"""
+    try:
+        with engine.connect() as conn:
+            query = text(f"""
+                SELECT DISTINCT "SERVICIO BENEFICIARIO"
+                FROM "{esquema}"."ejecucion_por_zonas"
+                WHERE "SERVICIO BENEFICIARIO" IS NOT NULL
+                ORDER BY "SERVICIO BENEFICIARIO"
+            """)
+            result = conn.execute(query)
+            
+            servicios = [row[0] for row in result]
+            return servicios
+    except Exception as e:
+        st.error(f"Error obteniendo servicios beneficiarios: {e}")
+        return []
+
+def obtener_proximo_numero_oc(esquema):
+    """Genera un número para la próxima orden de compra"""
+    try:
+        year = datetime.now().year
+        month = datetime.now().month
+        
+        with engine.connect() as conn:
+            # Consultar el número más alto actual
+            query = text("""
+                SELECT MAX(CAST(SUBSTRING(numero_orden FROM '^\\d+') AS INTEGER))
+                FROM ordenes_compra 
+                WHERE esquema = :esquema 
+                AND EXTRACT(YEAR FROM fecha_emision) = :year
+                AND EXTRACT(MONTH FROM fecha_emision) = :month
+            """)
+            
+            result = conn.execute(query, {'esquema': esquema, 'year': year, 'month': month})
+            max_num = result.scalar()
+            
+            if max_num is None:
+                next_num = 1
+            else:
+                next_num = max_num + 1
+            
+            # Obtener datos del llamado para el número de OC
+            query_llamado = text(f"""
+                SELECT "NUMERO DE LLAMADO", "AÑO DEL LLAMADO"
+                FROM "{esquema}"."llamado"
+                LIMIT 1
+            """)
+            
+            result_llamado = conn.execute(query_llamado)
+            llamado_data = result_llamado.fetchone()
+            
+            if llamado_data:
+                num_llamado = llamado_data[0]
+                anho_llamado = llamado_data[1]
+                
+                # Formato: NNN/YYYY-LL/MM (donde NNN es correlativo, YYYY año actual, LL es número de llamado, MM es mes)
+                numero_oc = f"{next_num:03d}/{year}-{num_llamado}/{month:02d}"
+                return numero_oc
+            else:
+                # Formato alternativo si no hay datos de llamado
+                numero_oc = f"{next_num:03d}/{year}-{month:02d}"
+                return numero_oc
+            
+    except Exception as e:
+        st.error(f"Error generando número de orden de compra: {e}")
+        return f"{datetime.now().strftime('%Y%m%d%H%M%S')}"
+
+def crear_orden_compra(esquema, numero_orden, fecha_emision, servicio_beneficiario, simese, items):
+    """
+    Crea una nueva orden de compra con sus items
+    
+    Args:
+        esquema (str): Esquema de la licitación
+        numero_orden (str): Número de la orden de compra
+        fecha_emision (datetime): Fecha de emisión
+        servicio_beneficiario (str): Servicio beneficiario
+        simese (str): Número de SIMESE
+        items (list): Lista de items para la orden de compra
+    
+    Returns:
+        tuple: (success, message, orden_id)
+    """
+    try:
+        with engine.connect() as conn:
+            # Iniciar transacción
+            trans = conn.begin()
+            try:
+                # Insertar cabecera de orden de compra
+                query = text("""
+                    INSERT INTO ordenes_compra 
+                    (numero_orden, fecha_emision, esquema, servicio_beneficiario, simese, usuario_id, estado)
+                    VALUES (:numero_orden, :fecha_emision, :esquema, :servicio_beneficiario, :simese, :usuario_id, 'Emitida')
+                    RETURNING id
+                """)
+                
+                result = conn.execute(query, {
+                    'numero_orden': numero_orden,
+                    'fecha_emision': fecha_emision,
+                    'esquema': esquema,
+                    'servicio_beneficiario': servicio_beneficiario,
+                    'simese': simese,
+                    'usuario_id': st.session_state.user_id
+                })
+                
+                orden_id = result.scalar()
+                
+                # Insertar items de la orden
+                for item in items:
+                    monto_total = item['cantidad'] * item['precio_unitario']
+                    
+                    query_item = text("""
+                        INSERT INTO items_orden_compra
+                        (orden_compra_id, lote, item, codigo_insumo, codigo_servicio, 
+                         descripcion, cantidad, unidad_medida, precio_unitario, monto_total, observaciones)
+                        VALUES
+                        (:orden_id, :lote, :item, :codigo_insumo, :codigo_servicio,
+                         :descripcion, :cantidad, :unidad_medida, :precio_unitario, :monto_total, :observaciones)
+                    """)
+                    
+                    conn.execute(query_item, {
+                        'orden_id': orden_id,
+                        'lote': item['lote'],
+                        'item': item['item'],
+                        'codigo_insumo': item['codigo_insumo'],
+                        'codigo_servicio': item['codigo_servicio'],
+                        'descripcion': item['descripcion'],
+                        'cantidad': item['cantidad'],
+                        'unidad_medida': item['unidad_medida'],
+                        'precio_unitario': item['precio_unitario'],
+                        'monto_total': monto_total,
+                        'observaciones': item.get('observaciones', '')
+                    })
+                    
+                    # Actualizar cantidad emitida en la tabla de ejecución por zonas
+                    query_update = text(f"""
+                        UPDATE "{esquema}"."ejecucion_por_zonas"
+                        SET "CANTIDAD EMITIDA" = "CANTIDAD EMITIDA" + :cantidad,
+                            "SALDO A EMITIR" = "REDISTRIBUCION (CANTIDAD MAXIMA)" - ("CANTIDAD EMITIDA" + :cantidad),
+                            "PORCENTAJE EMITIDO POR SERVICIO SANITARIO" = 
+                                (("CANTIDAD EMITIDA" + :cantidad) / "REDISTRIBUCION (CANTIDAD MAXIMA)") * 100
+                        WHERE "LOTE" = :lote 
+                        AND "ITEM" = :item
+                        AND "SERVICIO BENEFICIARIO" = :servicio
+                    """)
+                    
+                    conn.execute(query_update, {
+                        'cantidad': item['cantidad'],
+                        'lote': item['lote'],
+                        'item': item['item'],
+                        'servicio': servicio_beneficiario
+                    })
+                    
+                    # También actualizar la tabla de ejecución general
+                    query_update_general = text(f"""
+                        UPDATE "{esquema}"."ejecucion_general"
+                        SET "CANTIDAD EMITIDA" = "CANTIDAD EMITIDA" + :cantidad,
+                            "SALDO A EMITIR" = "REDISTRIBUCION (CANTIDAD MAXIMA)" - ("CANTIDAD EMITIDA" + :cantidad),
+                            "PORCENTAJE EMITIDO" = 
+                                (("CANTIDAD EMITIDA" + :cantidad) / "REDISTRIBUCION (CANTIDAD MAXIMA)") * 100
+                        WHERE "LOTE" = :lote 
+                        AND "ITEM" = :item
+                    """)
+                    
+                    conn.execute(query_update_general, {
+                        'cantidad': item['cantidad'],
+                        'lote': item['lote'],
+                        'item': item['item']
+                    })
+                
+                # Actualizar también la tabla orden_de_compra del esquema
+                for item in items:
+                    query_insert_oc = text(f"""
+                        INSERT INTO "{esquema}"."orden_de_compra"
+                        ("SIMESE (PEDIDO)", "N° ORDEN DE COMPRA", "FECHA DE EMISION",
+                        "CODIGO DE REACTIVOS / INSUMOS + CODIGO DE SERVICIO BENEFICIARIO",
+                        "CODIGO DE REACTIVOS / INSUMOS", "SERVICIO BENEFICIARIO",
+                        "LOTE", "ITEM", "CANTIDAD SOLICITADA", "UNIDAD DE MEDIDA",
+                        "DESCRIPCION DEL PRODUCTO // MARCA // PROCEDENCIA", "PRECIO UNITARIO",
+                        "MONTO EMITIDO", "Observaciones")
+                        VALUES
+                        (:simese, :numero_orden, :fecha_emision,
+                        :codigo_completo, :codigo_insumo, :servicio,
+                        :lote, :item, :cantidad, :unidad_medida,
+                        :descripcion, :precio_unitario,
+                        :monto_total, :observaciones)
+                    """)
+                    
+                    codigo_completo = f"{item['codigo_insumo']}{item['codigo_servicio']}" if item['codigo_servicio'] else item['codigo_insumo']
+                    
+                    conn.execute(query_insert_oc, {
+                        'simese': simese,
+                        'numero_orden': numero_orden,
+                        'fecha_emision': fecha_emision,
+                        'codigo_completo': codigo_completo,
+                        'codigo_insumo': item['codigo_insumo'],
+                        'servicio': servicio_beneficiario,
+                        'lote': item['lote'],
+                        'item': item['item'],
+                        'cantidad': item['cantidad'],
+                        'unidad_medida': item['unidad_medida'],
+                        'descripcion': item['descripcion'],
+                        'precio_unitario': item['precio_unitario'],
+                        'monto_total': item['cantidad'] * item['precio_unitario'],
+                        'observaciones': item.get('observaciones', '')
+                    })
+                
+                # Confirmar transacción
+                trans.commit()
+                
+                return True, "Orden de compra creada exitosamente", orden_id
+                
+            except Exception as e:
+                # Revertir transacción en caso de error
+                trans.rollback()
+                raise e
+                
+    except Exception as e:
+        return False, f"Error al crear orden de compra: {e}", None
+
+def obtener_ordenes_compra(esquema=None):
+    """Obtiene las órdenes de compra existentes, filtradas por esquema si se especifica"""
+    try:
+        with engine.connect() as conn:
+            # Consulta base
+            query_base = """
+                SELECT oc.id, oc.numero_orden, oc.fecha_emision, oc.esquema, 
+                       oc.servicio_beneficiario, oc.simese, oc.estado, 
+                       u.username as usuario, oc.fecha_creacion,
+                       COUNT(ioc.id) as cantidad_items,
+                       SUM(ioc.monto_total) as monto_total
+                FROM reactivos_py.ordenes_compra oc
+                JOIN reactivos_py.usuarios u ON oc.usuario_id = u.id
+                LEFT JOIN reactivos_py.items_orden_compra ioc ON oc.id = ioc.orden_compra_id
+            """
+            
+            # Agregar filtro por esquema si es necesario
+            if esquema:
+                query_base += " WHERE oc.esquema = :esquema "
+                params = {'esquema': esquema}
+            else:
+                params = {}
+            
+            # Agrupar y ordenar
+            query_base += """
+                GROUP BY oc.id, oc.numero_orden, oc.fecha_emision, oc.esquema, 
+                         oc.servicio_beneficiario, oc.simese, oc.estado, 
+                         u.username, oc.fecha_creacion
+                ORDER BY oc.fecha_creacion DESC
+            """
+            
+            query = text(query_base)
+            result = conn.execute(query, params)
+            
+            ordenes = []
+            for row in result:
+                ordenes.append({
+                    'id': row[0],
+                    'numero_orden': row[1],
+                    'fecha_emision': row[2],
+                    'esquema': row[3],
+                    'servicio_beneficiario': row[4],
+                    'simese': row[5],
+                    'estado': row[6],
+                    'usuario': row[7],
+                    'fecha_creacion': row[8],
+                    'cantidad_items': row[9],
+                    'monto_total': row[10]
+                })
+            
+            return ordenes
+    except Exception as e:
+        st.error(f"Error obteniendo órdenes de compra: {e}")
+        return []
+
+def obtener_detalles_orden_compra(orden_id):
+    """Obtiene los detalles completos de una orden de compra"""
+    try:
+        with engine.connect() as conn:
+            # Obtener cabecera
+            query_cabecera = text("""
+                SELECT oc.id, oc.numero_orden, oc.fecha_emision, oc.esquema, 
+                       oc.servicio_beneficiario, oc.simese, oc.estado, 
+                       u.username as usuario, oc.fecha_creacion,
+                       u.nombre_completo as usuario_nombre
+                FROM ordenes_compra oc
+                JOIN usuarios u ON oc.usuario_id = u.id
+                WHERE oc.id = :orden_id
+            """)
+            
+            result = conn.execute(query_cabecera, {'orden_id': orden_id})
+            cabecera = result.fetchone()
+            
+            if not cabecera:
+                return None
+            
+            # Obtener items
+            query_items = text("""
+                SELECT id, lote, item, codigo_insumo, codigo_servicio, 
+                       descripcion, cantidad, unidad_medida, precio_unitario, 
+                       monto_total, observaciones
+                FROM items_orden_compra
+                WHERE orden_compra_id = :orden_id
+                ORDER BY lote, item
+            """)
+            
+            result_items = conn.execute(query_items, {'orden_id': orden_id})
+            
+            items = []
+            for row in result_items:
+                items.append({
+                    'id': row[0],
+                    'lote': row[1],
+                    'item': row[2],
+                    'codigo_insumo': row[3],
+                    'codigo_servicio': row[4],
+                    'descripcion': row[5],
+                    'cantidad': row[6],
+                    'unidad_medida': row[7],
+                    'precio_unitario': row[8],
+                    'monto_total': row[9],
+                    'observaciones': row[10]
+                })
+            
+            # Obtener datos de la licitación desde el esquema
+            query_licitacion = text(f"""
+                SELECT "NUMERO DE LLAMADO", "AÑO DEL LLAMADO", "NOMBRE DEL LLAMADO", 
+                       "EMPRESA ADJUDICADA", "FECHA DE FIRMA DEL CONTRATO", 
+                       "N° de Contrato / Año", "Vigencia del Contrato"
+                FROM "{cabecera[3]}"."llamado"
+                LIMIT 1
+            """)
+            
+            result_licitacion = conn.execute(query_licitacion)
+            licitacion = result_licitacion.fetchone()
+            
+            # Armar respuesta completa
+            orden = {
+                'id': cabecera[0],
+                'numero_orden': cabecera[1],
+                'fecha_emision': cabecera[2],
+                'esquema': cabecera[3],
+                'servicio_beneficiario': cabecera[4],
+                'simese': cabecera[5],
+                'estado': cabecera[6],
+                'usuario': cabecera[7],
+                'fecha_creacion': cabecera[8],
+                'usuario_nombre': cabecera[9],
+                'items': items,
+                'monto_total': sum(item['monto_total'] for item in items),
+                'cantidad_items': len(items)
+            }
+            
+            # Agregar datos de licitación si están disponibles
+            if licitacion:
+                orden['licitacion'] = {
+                    'numero_llamado': licitacion[0],
+                    'anio_llamado': licitacion[1],
+                    'nombre_llamado': licitacion[2],
+                    'empresa_adjudicada': licitacion[3],
+                    'fecha_contrato': licitacion[4],
+                    'numero_contrato': licitacion[5],
+                    'vigencia_contrato': licitacion[6]
+                }
+            
+            return orden
+    except Exception as e:
+        st.error(f"Error obteniendo detalles de orden de compra: {e}")
+        return None
+
+def cambiar_estado_orden_compra(orden_id, nuevo_estado):
+    """Cambia el estado de una orden de compra"""
+    try:
+        with engine.connect() as conn:
+            query = text("""
+                UPDATE ordenes_compra
+                SET estado = :estado
+                WHERE id = :orden_id
+                RETURNING numero_orden
+            """)
+            
+            result = conn.execute(query, {'estado': nuevo_estado, 'orden_id': orden_id})
+            numero_orden = result.scalar()
+            
+            if numero_orden:
+                return True, f"Estado de orden {numero_orden} cambiado a '{nuevo_estado}'"
+            else:
+                return False, "Orden de compra no encontrada"
+    except Exception as e:
+        return False, f"Error al cambiar estado: {e}"
+
+def generar_pdf_orden_compra(orden_id):
+    """
+    Genera un PDF para la orden de compra
+    
+    Esta función es un placeholder. En la implementación real, deberías usar 
+    una biblioteca como reportlab, weasyprint o pdfkit para generar el PDF.
+    
+    Returns:
+        bytes: Contenido del PDF
+    """
+    try:
+        orden = obtener_detalles_orden_compra(orden_id)
+        if not orden:
+            return None, "Orden no encontrada"
+            
+        # Placeholder: En una implementación real, aquí generarías el PDF
+        # Por ahora, solo devolvemos un mensaje indicando que esta función debe implementarse
+        return None, "La generación de PDF debe implementarse utilizando una biblioteca como reportlab o weasyprint"
+    except Exception as e:
+        return None, f"Error generando PDF: {e}"
+
+def pagina_ordenes_compra():
+    """Página principal de gestión de órdenes de compra"""
+    st.header("Gestión de Órdenes de Compra")
+    
+    # Obtener esquemas existentes
+    esquemas = obtener_esquemas_postgres()
+
+    # Pestañas para diferentes funciones
+    tab1, tab2 = st.tabs(["Lista de Órdenes", "Emitir Nueva Orden"])
+    
+    # [Código existente para tab1]...
+    
+    with tab2:
+        st.subheader("Emitir Nueva Orden de Compra")
+        
+        # Selector de esquema (licitación)
+        esquema_seleccionado = st.selectbox(
+            "Seleccionar Licitación:",
+            options=esquemas
+        )
+        
+        if esquema_seleccionado:
+            # Obtener información de la licitación
+            with engine.connect() as conn:
+                try:
+                    query = text(f"""
+                        SELECT "NUMERO DE LLAMADO", "AÑO DEL LLAMADO", "NOMBRE DEL LLAMADO", 
+                               "EMPRESA ADJUDICADA"
+                        FROM "{esquema_seleccionado}"."llamado"
+                        LIMIT 1
+                    """)
+                    result = conn.execute(query)
+                    licitacion = result.fetchone()
+                    
+                    if licitacion:
+                        st.write(f"**Licitación:** {licitacion[0]}/{licitacion[1]} - {licitacion[2]}")
+                        st.write(f"**Empresa:** {licitacion[3]}")
+                except Exception as e:
+                    st.error(f"Error obteniendo datos de licitación: {e}")
+            
+            # Obtener lista de servicios beneficiarios
+            servicios = obtener_servicios_beneficiarios(esquema_seleccionado)
+            
+            if servicios:
+                servicio_seleccionado = st.selectbox(
+                    "Seleccionar Servicio Beneficiario:",
+                    options=servicios
+                )
+                
+                # Formulario para los datos de la orden de compra
+                with st.form("nueva_orden_form"):
+                    col1, col2 = st.columns(2)
+                    
+                    with col1:
+                        # Generar número de orden sugerido
+                        numero_sugerido = obtener_proximo_numero_oc(esquema_seleccionado)
+                        numero_orden = st.text_input("Número de Orden:", value=numero_sugerido)
+                    
+                    with col2:
+                        fecha_emision = st.date_input(
+                            "Fecha de Emisión:",
+                            value=datetime.now()
+                        )
+                    
+                    simese = st.text_input("Número de SIMESE (Pedido):")
+                    
+                    st.subheader("Selección de Items")
+                    
+                    # Obtener items disponibles para el servicio seleccionado
+                    items_disponibles = obtener_datos_items(esquema_seleccionado, servicio_seleccionado)
+                    
+                    if not items_disponibles:
+                        st.warning(f"No hay items disponibles para el servicio '{servicio_seleccionado}'")
+                        submit_disabled = True
+                    else:
+                        # Mostrar items disponibles en una tabla más completa
+                        df_items = pd.DataFrame(items_disponibles)
+                        
+                        # Agregar columnas de ejecución
+                        if 'saldo_emitir' in df_items.columns and 'cantidad_maxima' in df_items.columns:
+                            df_items['porcentaje_ejecucion_servicio'] = (1 - (df_items['saldo_emitir'] / df_items['cantidad_maxima'])) * 100
+                            df_items['porcentaje_ejecucion_servicio'] = df_items['porcentaje_ejecucion_servicio'].round(2)
+                        
+                        # Formatear para mejor visualización
+                        df_display = df_items.copy()
+                        if 'precio_unitario' in df_display.columns:
+                            df_display['precio_unitario'] = df_display['precio_unitario'].apply(lambda x: f"₲ {x:,.0f}".replace(",", "."))
+                        
+                        st.dataframe(df_display)
+                        
+                        # Inicializar lista de items seleccionados si no existe
+                        if 'items_seleccionados' not in st.session_state:
+                            st.session_state.items_seleccionados = []
+                        
+                        # Selector para agregar un item
+                        items_opciones = {f"{i['lote'] or '-'}-{i['item']} | {i['descripcion'][:40]}..." if len(i['descripcion']) > 40 else f"{i['lote'] or '-'}-{i['item']} | {i['descripcion']}" for i in items_disponibles}
+                        item_seleccionado = st.selectbox(
+                            "Seleccionar Item para agregar:",
+                            options=list(items_opciones.keys())
+                        )
+                        
+                        # Encontrar el ítem seleccionado
+                        item_seleccionado_info = next((i for i in items_disponibles if 
+                                                   f"{i['lote'] or '-'}-{i['item']} | {i['descripcion'][:40]}..." == item_seleccionado or
+                                                   f"{i['lote'] or '-'}-{i['item']} | {i['descripcion']}" == item_seleccionado), None)
+                        
+                        if item_seleccionado_info:
+                            col1, col2, col3 = st.columns(3)
+                            with col1:
+                                cantidad = st.number_input(
+                                    "Cantidad:",
+                                    min_value=0.01,
+                                    max_value=float(item_seleccionado_info['saldo_emitir']),
+                                    value=min(1.0, float(item_seleccionado_info['saldo_emitir'])),
+                                    step=0.01,
+                                    format="%.2f"
+                                )
+                            
+                            with col2:
+                                # Determinar si se puede agregar cantidad complementaria (20%)
+                                puede_complementario = True  # Lógica para determinar si puede tener complementario
+                                if puede_complementario:
+                                    usar_complementario = st.checkbox("Agregar cantidad complementaria (20%)")
+                                    cantidad_complementaria = cantidad * 0.2 if usar_complementario else 0
+                                else:
+                                    usar_complementario = False
+                                    cantidad_complementaria = 0
+                            
+                            with col3:
+                                precio = st.number_input(
+                                    "Precio Unitario:",
+                                    min_value=0.01,
+                                    value=float(item_seleccionado_info['precio_unitario']),
+                                    step=0.01,
+                                    format="%.2f",
+                                    disabled=True
+                                )
+                            
+                            # Calcular subtotal
+                            subtotal = (cantidad + cantidad_complementaria) * precio
+                            st.write(f"**Subtotal:** ₲ {subtotal:,.0f}".replace(",", "."))
+                            
+                            observaciones = st.text_area("Observaciones:", height=100)
+                            
+                            # Botón para agregar item a la lista
+                            agregar_item = st.form_submit_button("Agregar Item")
+                            
+                            if agregar_item:
+                                # Crear item para agregar
+                                nuevo_item = {
+                                    'lote': item_seleccionado_info['lote'],
+                                    'item': item_seleccionado_info['item'],
+                                    'codigo_insumo': item_seleccionado_info['codigo_insumo'],
+                                    'codigo_servicio': item_seleccionado_info['codigo_servicio'],
+                                    'descripcion': item_seleccionado_info['descripcion'],
+                                    'cantidad': cantidad,
+                                    'cantidad_complementaria': cantidad_complementaria,
+                                    'cantidad_total': cantidad + cantidad_complementaria,
+                                    'unidad_medida': item_seleccionado_info['unidad_medida'],
+                                    'precio_unitario': float(item_seleccionado_info['precio_unitario']),
+                                    'monto_total': subtotal,
+                                    'observaciones': observaciones,
+                                    'saldo_emitir': float(item_seleccionado_info['saldo_emitir']),
+                                    'porcentaje_ejecucion_servicio': float(item_seleccionado_info.get('porcentaje_ejecucion_servicio', 0)),
+                                    'porcentaje_ejecucion_global': float(item_seleccionado_info.get('porcentaje_ejecucion_global', 0))
+                                }
+                                
+                                # Verificar que no se haya agregado ya
+                                item_existe = any(
+                                    i['lote'] == nuevo_item['lote'] and 
+                                    i['item'] == nuevo_item['item'] 
+                                    for i in st.session_state.items_seleccionados
+                                )
+                                
+                                if item_existe:
+                                    st.error(f"El item {nuevo_item['lote'] or '-'}-{nuevo_item['item']} ya fue agregado.")
+                                else:
+                                    st.session_state.items_seleccionados.append(nuevo_item)
+                                    st.success(f"Item {nuevo_item['lote'] or '-'}-{nuevo_item['item']} agregado a la orden.")
+                                    st.rerun()
+                        
+                        # Mostrar items seleccionados
+                        if st.session_state.items_seleccionados:
+                            st.subheader("Items Seleccionados")
+                            
+                            # Crear DataFrame para visualización
+                            df_seleccionados = pd.DataFrame(st.session_state.items_seleccionados)
+                            
+                            # Formatear para mejor visualización
+                            df_display = df_seleccionados.copy()
+                            df_display['precio_unitario'] = df_display['precio_unitario'].apply(lambda x: f"₲ {x:,.0f}".replace(",", "."))
+                            df_display['monto_total'] = df_display['monto_total'].apply(lambda x: f"₲ {x:,.0f}".replace(",", "."))
+                            
+                            # Mostrar DataFrame
+                            st.dataframe(df_display)
+                            
+                            # Mostrar monto total
+                            monto_total = sum(item['monto_total'] for item in st.session_state.items_seleccionados)
+                            st.subheader(f"Monto Total: ₲ {monto_total:,.0f}".replace(",", "."))
+                            
+                            # Mostrar vista previa del PDF
+                            with st.expander("Vista previa de la Orden de Compra"):
+                                # Crear una vista previa del PDF como HTML
+                                html_preview = f"""
+                                <div style="border: 1px solid #ddd; padding: 20px; font-family: Arial, sans-serif;">
+                                    <div style="text-align: center; margin-bottom: 20px;">
+                                        <h3>GOBIERNO NACIONAL</h3>
+                                        <h4>Ministerio de Salud Pública y Bienestar Social</h4>
+                                        <h2>ORDEN DE COMPRA N° {numero_orden}</h2>
+                                    </div>
+                                    
+                                    <div style="display: flex; justify-content: space-between; margin-bottom: 20px;">
+                                        <div>
+                                            <p><strong>Señores:</strong> {licitacion[3]}</p>
+                                            <p><strong>Licitación:</strong> {licitacion[0]}/{licitacion[1]} - {licitacion[2]}</p>
+                                        </div>
+                                        <div>
+                                            <p><strong>Fecha de Emisión:</strong> {fecha_emision.strftime('%d/%m/%Y')}</p>
+                                            <p><strong>SIMESE:</strong> {simese}</p>
+                                        </div>
+                                    </div>
+                                    
+                                    <p><strong>Servicio Beneficiario:</strong> {servicio_seleccionado}</p>
+                                    
+                                    <table style="width: 100%; border-collapse: collapse; margin-bottom: 20px;">
+                                        <thead>
+                                            <tr style="background-color: #f2f2f2;">
+                                                <th style="border: 1px solid #ddd; padding: 8px; text-align: center;">Lote</th>
+                                                <th style="border: 1px solid #ddd; padding: 8px; text-align: center;">Item</th>
+                                                <th style="border: 1px solid #ddd; padding: 8px; text-align: center;">Cantidad</th>
+                                                <th style="border: 1px solid #ddd; padding: 8px; text-align: center;">Cantidad Comp.</th>
+                                                <th style="border: 1px solid #ddd; padding: 8px; text-align: center;">Unidad</th>
+                                                <th style="border: 1px solid #ddd; padding: 8px; text-align: center;">Descripción</th>
+                                                <th style="border: 1px solid #ddd; padding: 8px; text-align: center;">Ejecución</th>
+                                                <th style="border: 1px solid #ddd; padding: 8px; text-align: center;">Precio Unit.</th>
+                                                <th style="border: 1px solid #ddd; padding: 8px; text-align: center;">Subtotal</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                """
+                                
+                                for item in st.session_state.items_seleccionados:
+                                    lote_display = item['lote'] if item['lote'] else "-"
+                                    cantidad_comp_display = f"{item['cantidad_complementaria']:.2f}" if item['cantidad_complementaria'] > 0 else "-"
+                                    ejecucion_display = f"{item['porcentaje_ejecucion_servicio']:.1f}% / {item['porcentaje_ejecucion_global']:.1f}%"
+                                    
+                                    html_preview += f"""
+                                        <tr>
+                                            <td style="border: 1px solid #ddd; padding: 8px; text-align: center;">{lote_display}</td>
+                                            <td style="border: 1px solid #ddd; padding: 8px; text-align: center;">{item['item']}</td>
+                                            <td style="border: 1px solid #ddd; padding: 8px; text-align: right;">{item['cantidad']:.2f}</td>
+                                            <td style="border: 1px solid #ddd; padding: 8px; text-align: right;">{cantidad_comp_display}</td>
+                                            <td style="border: 1px solid #ddd; padding: 8px; text-align: center;">{item['unidad_medida']}</td>
+                                            <td style="border: 1px solid #ddd; padding: 8px; text-align: left;">{item['descripcion']}</td>
+                                            <td style="border: 1px solid #ddd; padding: 8px; text-align: center;">{ejecucion_display}</td>
+                                            <td style="border: 1px solid #ddd; padding: 8px; text-align: right;">₲ {item['precio_unitario']:,.0f}</td>
+                                            <td style="border: 1px solid #ddd; padding: 8px; text-align: right;">₲ {item['monto_total']:,.0f}</td>
+                                        </tr>
+                                    """.replace(",", ".")
+                                
+                                html_preview += f"""
+                                        </tbody>
+                                        <tfoot>
+                                            <tr>
+                                                <td colspan="8" style="border: 1px solid #ddd; padding: 8px; text-align: right;"><strong>TOTAL</strong></td>
+                                                <td style="border: 1px solid #ddd; padding: 8px; text-align: right;"><strong>₲ {monto_total:,.0f}</strong></td>
+                                            </tr>
+                                        </tfoot>
+                                    </table>
+                                    
+                                    <p><strong>Son Guaraníes:</strong> {numero_a_letras(monto_total)}</p>
+                                    
+                                    <div style="margin-top: 50px; display: flex; justify-content: space-between;">
+                                        <div style="text-align: center; width: 30%;">
+                                            <div style="border-top: 1px solid #000; padding-top: 10px;">
+                                                Director Administrativo
+                                            </div>
+                                        </div>
+                                        <div style="text-align: center; width: 30%;">
+                                            <div style="border-top: 1px solid #000; padding-top: 10px;">
+                                                Director General
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                                """
+                                
+                                st.components.v1.html(html_preview, height=600)
+                            
+                            # Botón para limpiar lista
+                            if st.form_submit_button("Limpiar Lista"):
+                                st.session_state.items_seleccionados = []
+                                st.rerun()
+                        
+                        submit_disabled = len(st.session_state.items_seleccionados) == 0
+                    
+                    # Botón para emitir orden
+                    submit = st.form_submit_button("Emitir Orden de Compra", disabled=submit_disabled)
+                    
+                    if submit and st.session_state.items_seleccionados:
+                        # Validar datos
+                        if not numero_orden:
+                            st.error("Debe ingresar un número de orden.")
+                        elif not simese:
+                            st.error("Debe ingresar un número de SIMESE.")
+                        else:
+                            # Crear orden de compra
+                            success, message, orden_id = crear_orden_compra(
+                                esquema_seleccionado,
+                                numero_orden,
+                                fecha_emision,
+                                servicio_seleccionado,
+                                simese,
+                                st.session_state.items_seleccionados
+                            )
+                            
+                            if success:
+                                st.success(message)
+                                # Limpiar estado
+                                st.session_state.items_seleccionados = []
+                                # Mostrar botón para ver la orden
+                                if st.button("Ver Orden Creada"):
+                                    st.session_state.orden_seleccionada = orden_id
+                                    st.session_state.menu = "ordenes_compra"
+                                    st.rerun()
+                            else:
+                                st.error(message)
+            else:
+                st.warning(f"No hay servicios beneficiarios definidos para la licitación seleccionada.")
+        else:
+            st.info("Seleccione una licitación para emitir una orden de compra.")
+
+
+def pagina_dashboard():
+    """Página de resumen/dashboard"""
+    st.header("Dashboard")
+    
+    # Mostrar información resumida
+    col1, col2, col3 = st.columns(3)
+    
+    try:
+        # Iniciar actualización automática
+        iniciar_actualizacion_automatica()
+        
+        # Obtener cantidad de esquemas
+        esquemas = obtener_esquemas_postgres()
+        # Filtrar reactivos_py del conteo de esquemas
+        esquemas = [e for e in esquemas if e != 'reactivos_py']
+        
+        with col1:
+            st.metric(
+                label="Total Licitaciones", 
+                value=len(esquemas)
+            )
+        
+        # En lugar de obtener órdenes de compra directamente (lo que causa error),
+        # mostrar información alternativa o un mensaje
+        with col2:
+            try:
+                # Intentar obtener órdenes de compra del esquema correcto
+                with engine.connect() as conn:
+                    query = text("""
+                        SELECT COUNT(*) 
+                        FROM reactivos_py.ordenes_compra
+                    """)
+                    result = conn.execute(query)
+                    count = result.scalar() or 0
+                    st.metric(
+                        label="Órdenes de Compra", 
+                        value=count
+                    )
+            except Exception:
+                # Si hay error, solo mostrar 0
+                st.metric(
+                    label="Órdenes de Compra", 
+                    value="0"
+                )
+        
+        with col3:
+            try:
+                # Intentar obtener monto total de órdenes de compra
+                with engine.connect() as conn:
+                    query = text("""
+                        SELECT SUM(monto_total) 
+                        FROM reactivos_py.items_orden_compra
+                    """)
+                    result = conn.execute(query)
+                    monto_total = result.scalar() or 0
+                    st.metric(
+                        label="Monto Total Emitido", 
+                        value=f"₲ {monto_total:,.0f}".replace(",", ".")
+                    )
+            except Exception:
+                # Si hay error, solo mostrar 0
+                st.metric(
+                    label="Monto Total Emitido", 
+                    value="₲ 0"
+                )
+        
+        # Mostrar gráficos
+        st.subheader("Esquemas Disponibles")
+        
+        if esquemas:
+            # Crear un gráfico simple de los esquemas
+            datos_grafico = pd.DataFrame({
+                'Esquema': esquemas,
+                'Cantidad': [1] * len(esquemas)  # Solo para visualización
+            })
+            
+            st.bar_chart(datos_grafico.set_index('Esquema'))
+            
+            # Lista de esquemas disponibles
+            st.subheader("Licitaciones Disponibles")
+            for i, esquema in enumerate(esquemas, 1):
+                st.write(f"{i}. {esquema}")
+            
+            # Botón para ir a órdenes de compra
+            if st.button("Gestionar Archivos"):
+                # Cambiar a la página de cargas
+                st.session_state.menu = "cargar_archivo"
+                st.rerun()
+        else:
+            st.info("No hay licitaciones disponibles. Por favor, cargue un archivo primero.")
+        
+    except Exception as e:
+        st.error(f"Error al cargar el dashboard: {e}")
 
 def main():
     st.set_page_config(
-        page_title="Gestión de Esquemas PostgreSQL",
+        page_title="Gestión de Licitaciones",
         page_icon="📊",
         layout="wide"
     )
     
-    # Verificar conexión con PostgreSQL al iniciar
+    # Configurar tablas si no existen
+    configurar_tabla_usuarios()
+    configurar_tabla_ordenes_compra()
+    configurar_tabla_cargas()
+    configurar_tabla_proveedores()
+    
+    # Inicializar el estado de sesión si es necesario
+    if 'logged_in' not in st.session_state:
+        st.session_state.logged_in = False
+    
+    # Verificar si el usuario está autenticado
+    if not st.session_state.logged_in:
+        pagina_login()
+        return
+    
+    # Verificar si el usuario requiere cambio de contraseña
+    if 'requiere_cambio_password' in st.session_state and st.session_state.requiere_cambio_password:
+        pagina_cambiar_password()
+        return
+    
+    # Si llega aquí, el usuario está autenticado
     try:
         with engine.connect() as conn:
             conn.execute(text("SELECT 1"))
-        st.sidebar.success("✅ Conectado a PostgreSQL")
+        st.sidebar.success(f"✅ Conectado a PostgreSQL | Usuario: {st.session_state.username}")
         
         # Mostrar estado de actualización automática
         if 'ultima_actualizacion' in st.session_state:
@@ -656,26 +2530,558 @@ def main():
         return
     
     # Título principal
-    st.title("Gestión de Archivos Excel a Base de Datos")
+    st.title("Sistema de Gestión de Llamados Reactivos")
     
-    # Crear un menú de navegación más atractivo
+    # Opciones de menú según el rol
+    if st.session_state.user_role == 'admin':
+        menu_options = {
+        "dashboard": "📈 Dashboard",
+        "cargar_archivo": "📥 Cargar Archivo", 
+        "ver_cargas": "📋 Ver Cargas",
+        "ordenes_compra": "📝 Órdenes de Compra",
+        "gestionar_proveedores": "🏭 Gestión de Proveedores",  # ← AGREGAR ESTA LÍNEA
+        "eliminar_esquemas": "🗑️ Eliminar Esquemas",
+        "admin_usuarios": "👥 Administrar Usuarios",
+        "cambiar_password": "🔑 Cambiar Contraseña",
+        "logout": "🚪 Cerrar Sesión"
+    }
+    else:
+        menu_options = {
+        "dashboard": "📈 Dashboard",
+        "cargar_archivo": "📥 Cargar Archivo", 
+        "ver_cargas": "📋 Ver Cargas",
+        "ordenes_compra": "📝 Órdenes de Compra",
+        "gestionar_proveedores": "🏭 Gestión de Proveedores",  # ← AGREGAR ESTA LÍNEA TAMBIÉN
+        "cambiar_password": "🔑 Cambiar Contraseña",
+        "logout": "🚪 Cerrar Sesión"
+    }
+    
+    # Crear menú de navegación
     menu = st.sidebar.radio(
         "Menú de Navegación", 
-        ["Cargar archivo", "Ver cargas", "Eliminar esquemas"],
-        format_func=lambda x: {
-            "Cargar archivo": "📥 Cargar archivo", 
-            "Ver cargas": "📋 Ver cargas",
-            "Eliminar esquemas": "🗑️ Eliminar esquemas"
-        }[x]
+        list(menu_options.keys()),
+        format_func=lambda x: menu_options[x]
     )
     
     # Mostrar la página seleccionada
-    if menu == "Cargar archivo":
+    if menu == "dashboard":
+        pagina_dashboard()
+    elif menu == "cargar_archivo":
         pagina_cargar_archivo()
-    elif menu == "Ver cargas":
+    elif menu == "ver_cargas":
         pagina_ver_cargas()
-    elif menu == "Eliminar esquemas":
+    elif menu == "ordenes_compra":
+        pagina_ordenes_compra()
+    elif menu == "gestionar_proveedores":  # ← AGREGAR ESTA SECCIÓN
+        pagina_gestionar_proveedores()
+    elif menu == "eliminar_esquemas" and st.session_state.user_role == 'admin':
         pagina_eliminar_esquemas()
+    elif menu == "admin_usuarios" and st.session_state.user_role == 'admin':
+        pagina_administrar_usuarios()
+    elif menu == "cambiar_password":
+        pagina_cambiar_password()
+    elif menu == "logout":
+    
+    # Cerrar sesión
+        st.session_state.logged_in = False
+        st.session_state.user_id = None
+        st.session_state.user_role = None
+        st.session_state.username = None
+        st.success("Sesión cerrada correctamente. Redirigiendo...")
+        time.sleep(1)
+        st.rerun()
 
 if __name__ == "__main__":
     main()
+
+def obtener_ordenes_compra(esquema=None):
+    """Obtiene las órdenes de compra existentes, filtradas por esquema si se especifica"""
+    try:
+        with engine.connect() as conn:
+            # Consulta base
+            query_base = """
+                SELECT oc.id, oc.numero_orden, oc.fecha_emision, oc.esquema, 
+                       oc.servicio_beneficiario, oc.simese, oc.estado, 
+                       u.username as usuario, oc.fecha_creacion,
+                       COUNT(ioc.id) as cantidad_items,
+                       SUM(ioc.monto_total) as monto_total
+                FROM ordenes_compra oc
+                JOIN usuarios u ON oc.usuario_id = u.id
+                LEFT JOIN items_orden_compra ioc ON oc.id = ioc.orden_compra_id
+            """
+            
+            # Agregar filtro por esquema si es necesario
+            if esquema:
+                query_base += " WHERE oc.esquema = :esquema "
+                params = {'esquema': esquema}
+            else:
+                params = {}
+            
+            # Agrupar y ordenar
+            query_base += """
+                GROUP BY oc.id, oc.numero_orden, oc.fecha_emision, oc.esquema, 
+                         oc.servicio_beneficiario, oc.simese, oc.estado, 
+                         u.username, oc.fecha_creacion
+                ORDER BY oc.fecha_creacion DESC
+            """
+            
+            query = text(query_base)
+            result = conn.execute(query, params)
+            
+            ordenes = []
+            for row in result:
+                ordenes.append({
+                    'id': row[0],
+                    'numero_orden': row[1],
+                    'fecha_emision': row[2],
+                    'esquema': row[3],
+                    'servicio_beneficiario': row[4],
+                    'simese': row[5],
+                    'estado': row[6],
+                    'usuario': row[7],
+                    'fecha_creacion': row[8],
+                    'cantidad_items': row[9],
+                    'monto_total': row[10]
+                })
+            
+            return ordenes
+    except Exception as e:
+        st.error(f"Error obteniendo órdenes de compra: {e}")
+        return []
+
+def obtener_detalles_orden_compra(orden_id):
+    """Obtiene los detalles completos de una orden de compra"""
+    try:
+        with engine.connect() as conn:
+            # Obtener cabecera
+            query_cabecera = text("""
+                SELECT oc.id, oc.numero_orden, oc.fecha_emision, oc.esquema, 
+                       oc.servicio_beneficiario, oc.simese, oc.estado, 
+                       u.username as usuario, oc.fecha_creacion,
+                       u.nombre_completo as usuario_nombre
+                FROM ordenes_compra oc
+                JOIN usuarios u ON oc.usuario_id = u.id
+                WHERE oc.id = :orden_id
+            """)
+            
+            result = conn.execute(query_cabecera, {'orden_id': orden_id})
+            cabecera = result.fetchone()
+            
+            if not cabecera:
+                return None
+            
+            # Obtener items
+            query_items = text("""
+                SELECT id, lote, item, codigo_insumo, codigo_servicio, 
+                       descripcion, cantidad, unidad_medida, precio_unitario, 
+                       monto_total, observaciones
+                FROM items_orden_compra
+                WHERE orden_compra_id = :orden_id
+                ORDER BY lote, item
+            """)
+            
+            result_items = conn.execute(query_items, {'orden_id': orden_id})
+            
+            items = []
+            for row in result_items:
+                items.append({
+                    'id': row[0],
+                    'lote': row[1],
+                    'item': row[2],
+                    'codigo_insumo': row[3],
+                    'codigo_servicio': row[4],
+                    'descripcion': row[5],
+                    'cantidad': row[6],
+                    'unidad_medida': row[7],
+                    'precio_unitario': row[8],
+                    'monto_total': row[9],
+                    'observaciones': row[10]
+                })
+            
+            # Obtener datos de la licitación desde el esquema
+            query_licitacion = text(f"""
+                SELECT "NUMERO DE LLAMADO", "AÑO DEL LLAMADO", "NOMBRE DEL LLAMADO", 
+                       "EMPRESA ADJUDICADA", "FECHA DE FIRMA DEL CONTRATO", 
+                       "N° de Contrato / Año", "Vigencia del Contrato"
+                FROM "{cabecera[3]}"."llamado"
+                LIMIT 1
+            """)
+            
+            result_licitacion = conn.execute(query_licitacion)
+            licitacion = result_licitacion.fetchone()
+            
+            # Armar respuesta completa
+            orden = {
+                'id': cabecera[0],
+                'numero_orden': cabecera[1],
+                'fecha_emision': cabecera[2],
+                'esquema': cabecera[3],
+                'servicio_beneficiario': cabecera[4],
+                'simese': cabecera[5],
+                'estado': cabecera[6],
+                'usuario': cabecera[7],
+                'fecha_creacion': cabecera[8],
+                'usuario_nombre': cabecera[9],
+                'items': items,
+                'monto_total': sum(item['monto_total'] for item in items),
+                'cantidad_items': len(items)
+            }
+            
+            # Agregar datos de licitación si están disponibles
+            if licitacion:
+                orden['licitacion'] = {
+                    'numero_llamado': licitacion[0],
+                    'anio_llamado': licitacion[1],
+                    'nombre_llamado': licitacion[2],
+                    'empresa_adjudicada': licitacion[3],
+                    'fecha_contrato': licitacion[4],
+                    'numero_contrato': licitacion[5],
+                    'vigencia_contrato': licitacion[6]
+                }
+            
+            return orden
+    except Exception as e:
+        st.error(f"Error obteniendo detalles de orden de compra: {e}")
+        return None
+
+def cambiar_estado_orden_compra(orden_id, nuevo_estado):
+    """Cambia el estado de una orden de compra"""
+    try:
+        with engine.connect() as conn:
+            query = text("""
+                UPDATE ordenes_compra
+                SET estado = :estado
+                WHERE id = :orden_id
+                RETURNING numero_orden
+            """)
+            
+            result = conn.execute(query, {'estado': nuevo_estado, 'orden_id': orden_id})
+            numero_orden = result.scalar()
+            
+            if numero_orden:
+                return True, f"Estado de orden {numero_orden} cambiado a '{nuevo_estado}'"
+            else:
+                return False, "Orden de compra no encontrada"
+    except Exception as e:
+        return False, f"Error al cambiar estado: {e}"
+
+def generar_pdf_orden_compra(orden_id):
+    """
+    Genera un PDF para la orden de compra
+    
+    Esta función es un placeholder. En la implementación real, deberías usar 
+    una biblioteca como reportlab, weasyprint o pdfkit para generar el PDF.
+    
+    Returns:
+        bytes: Contenido del PDF
+    """
+    try:
+        orden = obtener_detalles_orden_compra(orden_id)
+        if not orden:
+            return None, "Orden no encontrada"
+            
+        # Placeholder: En una implementación real, aquí generarías el PDF
+        # Por ahora, solo devolvemos un mensaje indicando que esta función debe implementarse
+        return None, "La generación de PDF debe implementarse utilizando una biblioteca como reportlab o weasyprint"
+    except Exception as e:
+        return None, f"Error generando PDF: {e}"
+
+def pagina_ordenes_compra():
+    """Página principal de gestión de órdenes de compra"""
+    st.header("Gestión de Órdenes de Compra")
+    
+    # Pestañas para diferentes funciones
+    tab1, tab2 = st.tabs(["Lista de Órdenes", "Emitir Nueva Orden"])
+    
+    with tab1:
+        st.subheader("Órdenes de Compra Emitidas")
+        
+        # Opción para filtrar por esquema
+        esquemas = obtener_esquemas_postgres()
+        esquema_seleccionado = st.selectbox(
+            "Filtrar por esquema:",
+            options=["Todos"] + esquemas,
+            index=0
+        )
+        
+        # Obtener órdenes de compra
+        if esquema_seleccionado == "Todos":
+            ordenes = obtener_ordenes_compra()
+        else:
+            ordenes = obtener_ordenes_compra(esquema_seleccionado)
+        
+        if ordenes:
+            # Convertir a DataFrame para mejor visualización
+            df_ordenes = pd.DataFrame(ordenes)
+            
+            # Dar formato a las fechas
+            if 'fecha_emision' in df_ordenes.columns:
+                df_ordenes['fecha_emision'] = pd.to_datetime(df_ordenes['fecha_emision']).dt.strftime('%Y-%m-%d')
+            if 'fecha_creacion' in df_ordenes.columns:
+                df_ordenes['fecha_creacion'] = pd.to_datetime(df_ordenes['fecha_creacion']).dt.strftime('%Y-%m-%d %H:%M')
+            
+            # Dar formato al monto total
+            if 'monto_total' in df_ordenes.columns:
+                df_ordenes['monto_total'] = df_ordenes['monto_total'].apply(lambda x: f"₲ {x:,.0f}".replace(",", "."))
+            
+            # Mostrar órdenes
+            st.dataframe(df_ordenes)
+            
+            # Selector para ver detalles de una orden
+            ordenes_ids = {f"{o['numero_orden']} - {o['servicio_beneficiario']}": o['id'] for o in ordenes}
+            selected_orden = st.selectbox(
+                "Seleccionar orden para ver detalles:",
+                options=list(ordenes_ids.keys())
+            )
+            
+            if selected_orden:
+                orden_id = ordenes_ids[selected_orden]
+                orden = obtener_detalles_orden_compra(orden_id)
+                
+                if orden:
+                    st.subheader(f"Detalles de Orden de Compra: {orden['numero_orden']}")
+                    
+                    # Mostrar datos de cabecera
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        st.write(f"**Fecha Emisión:** {orden['fecha_emision'].strftime('%Y-%m-%d')}")
+                        st.write(f"**Servicio Beneficiario:** {orden['servicio_beneficiario']}")
+                        st.write(f"**SIMESE:** {orden['simese']}")
+                    with col2:
+                        st.write(f"**Estado:** {orden['estado']}")
+                        st.write(f"**Usuario:** {orden['usuario_nombre']} ({orden['usuario']})")
+                        st.write(f"**Fecha Creación:** {orden['fecha_creacion'].strftime('%Y-%m-%d %H:%M')}")
+                    
+                    # Mostrar datos de licitación si están disponibles
+                    if 'licitacion' in orden:
+                        with st.expander("Datos de la Licitación"):
+                            lic = orden['licitacion']
+                            st.write(f"**Llamado:** {lic['numero_llamado']}/{lic['anio_llamado']}")
+                            st.write(f"**Nombre:** {lic['nombre_llamado']}")
+                            st.write(f"**Empresa:** {lic['empresa_adjudicada']}")
+                            st.write(f"**Contrato:** {lic['numero_contrato']}")
+                            if lic['fecha_contrato']:
+                                st.write(f"**Fecha Contrato:** {lic['fecha_contrato'].strftime('%Y-%m-%d')}")
+                            st.write(f"**Vigencia:** {lic['vigencia_contrato']}")
+                    
+                    # Mostrar items
+                    st.subheader("Items de la Orden")
+                    
+                    if orden['items']:
+                        # Crear DataFrame para visualización
+                        df_items = pd.DataFrame(orden['items'])
+                        
+                        # Formatear montos
+                        df_items['precio_unitario'] = df_items['precio_unitario'].apply(lambda x: f"₲ {x:,.0f}".replace(",", "."))
+                        df_items['monto_total'] = df_items['monto_total'].apply(lambda x: f"₲ {x:,.0f}".replace(",", "."))
+                        
+                        # Mostrar DataFrame
+                        st.dataframe(df_items)
+                        
+                        # Mostrar monto total
+                        st.subheader(f"Monto Total: ₲ {orden['monto_total']:,.0f}".replace(",", "."))
+                    else:
+                        st.info("Esta orden no tiene items.")
+                    
+                    # Opciones para la orden
+                    col1, col2, col3 = st.columns(3)
+                    
+                    with col1:
+                        if orden['estado'] == 'Emitida':
+                            if st.button("Marcar como Entregada"):
+                                success, message = cambiar_estado_orden_compra(orden_id, "Entregada")
+                                if success:
+                                    st.success(message)
+                                    time.sleep(1)
+                                    st.rerun()
+                                else:
+                                    st.error(message)
+                                    
+                    with col2:
+                        if orden['estado'] in ['Emitida', 'Entregada']:
+                            if st.button("Marcar como Anulada"):
+                                success, message = cambiar_estado_orden_compra(orden_id, "Anulada")
+                                if success:
+                                    st.success(message)
+                                    time.sleep(1)
+                                    st.rerun()
+                                else:
+                                    st.error(message)
+                    
+                    with col3:
+                        if st.button("Generar PDF"):
+                            # Placeholder para generación de PDF
+                            st.info("La generación de PDF será implementada en una versión futura.")
+                            
+                            # En una implementación real, generarías el PDF y lo ofrecerías para descarga
+                            # pdf_bytes, message = generar_pdf_orden_compra(orden_id)
+                            # if pdf_bytes:
+                            #     st.download_button(
+                            #         label="Descargar PDF",
+                            #         data=pdf_bytes,
+                            #         file_name=f"OC_{orden['numero_orden']}.pdf",
+                            #         mime="application/pdf"
+                            #     )
+                            # else:
+                            #     st.error(message)
+        else:
+            st.info("No hay órdenes de compra para mostrar.")
+    
+    with tab2:
+        st.subheader("Emitir Nueva Orden de Compra")
+        
+        # Selector de esquema (licitación)
+        esquema_seleccionado = st.selectbox(
+            "Seleccionar Licitación:",
+            options=esquemas
+        )
+        
+        if esquema_seleccionado:
+            # Obtener información de la licitación
+            with engine.connect() as conn:
+                try:
+                    query = text(f"""
+                        SELECT "NUMERO DE LLAMADO", "AÑO DEL LLAMADO", "NOMBRE DEL LLAMADO", 
+                               "EMPRESA ADJUDICADA"
+                        FROM "{esquema_seleccionado}"."llamado"
+                        LIMIT 1
+                    """)
+                    result = conn.execute(query)
+                    licitacion = result.fetchone()
+                    
+                    if licitacion:
+                        st.write(f"**Licitación:** {licitacion[0]}/{licitacion[1]} - {licitacion[2]}")
+                        st.write(f"**Empresa:** {licitacion[3]}")
+                except Exception as e:
+                    st.error(f"Error obteniendo datos de licitación: {e}")
+            
+            # Obtener lista de servicios beneficiarios
+            servicios = obtener_servicios_beneficiarios(esquema_seleccionado)
+            
+            if servicios:
+                servicio_seleccionado = st.selectbox(
+                    "Seleccionar Servicio Beneficiario:",
+                    options=servicios
+                )
+                
+                # Formulario para los datos de la orden de compra
+                with st.form("nueva_orden_form"):
+                    col1, col2 = st.columns(2)
+                    
+                    with col1:
+                        # Generar número de orden sugerido
+                        numero_sugerido = obtener_proximo_numero_oc(esquema_seleccionado)
+                        numero_orden = st.text_input("Número de Orden:", value=numero_sugerido)
+                    
+                    with col2:
+                        fecha_emision = st.date_input(
+                            "Fecha de Emisión:",
+                            value=datetime.now()
+                        )
+                    
+                    simese = st.text_input("Número de SIMESE (Pedido):")
+                    
+                    st.subheader("Selección de Items")
+                    
+                    # Obtener items disponibles para el servicio seleccionado
+                    items_disponibles = obtener_datos_items(esquema_seleccionado, servicio_seleccionado)
+                    
+                    if not items_disponibles:
+                        st.warning(f"No hay items disponibles para el servicio '{servicio_seleccionado}'")
+                        submit_disabled = True
+                    else:
+                        # Inicializar lista de items seleccionados si no existe
+                        if 'items_seleccionados' not in st.session_state:
+                            st.session_state.items_seleccionados = []
+                        
+                        # Mostrar items disponibles
+                        df_items = pd.DataFrame(items_disponibles)
+                        
+                        # Formatear para mejor visualización
+                        df_display = df_items.copy()
+                        df_display['precio_unitario'] = df_display['precio_unitario'].apply(lambda x: f"₲ {x:,.0f}".replace(",", "."))
+                        
+                        st.dataframe(df_display)
+                        
+                        # Selector para agregar un item
+                        items_opciones = {f"{i['lote']}-{i['item']} | {i['descripcion']}": idx for idx, i in enumerate(items_disponibles)}
+                        item_seleccionado = st.selectbox(
+                            "Seleccionar Item para agregar:",
+                            options=list(items_opciones.keys())
+                        )
+                        
+                        idx_item = items_opciones[item_seleccionado]
+                        item = items_disponibles[idx_item]
+                        
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            cantidad = st.number_input(
+                                "Cantidad:",
+                                min_value=0.01,
+                                max_value=float(item['saldo_emitir']),
+                                value=min(1.0, float(item['saldo_emitir'])),
+                                step=0.01,
+                                format="%.2f"
+                            )
+                        
+                        with col2:
+                            precio = st.number_input(
+                                "Precio Unitario:",
+                                min_value=0.01,
+                                value=float(item['precio_unitario']),
+                                step=0.01,
+                                format="%.2f",
+                                disabled=True
+                            )
+                        
+                        observaciones = st.text_area("Observaciones:", height=100)
+                        
+                        # Botón para agregar item a la lista
+                        agregar_item = st.form_submit_button("Agregar Item")
+                        
+                        if agregar_item:
+                            # Crear item para agregar
+                            nuevo_item = {
+                                'lote': item['lote'],
+                                'item': item['item'],
+                                'codigo_insumo': item['codigo_insumo'],
+                                'codigo_servicio': item['codigo_servicio'],
+                                'descripcion': item['descripcion'],
+                                'cantidad': cantidad,
+                                'unidad_medida': item['unidad_medida'],
+                                'precio_unitario': float(item['precio_unitario']),
+                                'monto_total': cantidad * float(item['precio_unitario']),
+                                'observaciones': observaciones,
+                                'saldo_emitir': float(item['saldo_emitir'])
+                            }
+                            
+                            # Verificar que no se haya agregado ya
+                            item_existe = any(
+                                i['lote'] == nuevo_item['lote'] and 
+                                i['item'] == nuevo_item['item'] 
+                                for i in st.session_state.items_seleccionados
+                            )
+                            
+                            if item_existe:
+                                st.error(f"El item {nuevo_item['lote']}-{nuevo_item['item']} ya fue agregado.")
+                            else:
+                                st.session_state.items_seleccionados.append(nuevo_item)
+                                st.success(f"Item {nuevo_item['lote']}-{nuevo_item['item']} agregado a la orden.")
+                                st.rerun()
+                        
+                        # Mostrar items seleccionados
+                        if st.session_state.items_seleccionados:
+                            st.subheader("Items Seleccionados")
+                            
+                            # Crear DataFrame para visualización
+                            df_seleccionados = pd.DataFrame(st.session_state.items_seleccionados)
+                            
+                            # Formatear para mejor visualización
+                            df_display = df_seleccionados.copy()
+                            df_display['precio_unitario'] = df_display['precio_unitario'].apply(lambda x: f"₲ {x:,.0f}".replace(",", "."))
+                            df_display['monto_total'] = df_display['monto_total'].apply(lambda x: f"₲ {x:,.0f}".replace(",", "."))
+                            
+                            # Mostrar DataFrame
+                            st.dataframe(df_display)
+                            
+                            # Mostrar
