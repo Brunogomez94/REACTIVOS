@@ -27,6 +27,63 @@ except Exception as e:
     print(f"Error al crear conexión a PostgreSQL: {e}")
 
 # Función para configurar la tabla de usuarios
+def formatear_columnas_tabla(df, mapeo_columnas=None):
+    """Formatea las columnas de un DataFrame para mostrar al usuario final"""
+    mapeo_default = {
+        'id': 'ID',
+        'ruc': 'RUC',
+        'razon_social': 'Razón Social',
+        'direccion': 'Dirección',
+        'correo_electronico': 'Correo Electrónico',
+        'telefono': 'Teléfono',
+        'contacto_nombre': 'Contacto',
+        'activo': 'Estado',
+        'fecha_registro': 'Fecha Registro',
+        'fecha_actualizacion': 'Fecha Actualización',
+        'fecha_creacion': 'Fecha Creación',
+        'fecha_carga': 'Fecha Carga',
+        'nombre_archivo': 'Nombre Archivo',
+        'esquema': 'Esquema',
+        'usuario': 'Usuario',
+        'estado': 'Estado',
+        'usuario_id': 'Usuario ID',
+        'cedula': 'Cédula',
+        'username': 'Usuario',
+        'nombre_completo': 'Nombre Completo',
+        'role': 'Rol',
+        'ultimo_cambio_password': 'Último Cambio Password',
+        'numero_orden': 'Número Orden',
+        'fecha_emision': 'Fecha Emisión',
+        'servicio_beneficiario': 'Servicio Beneficiario',
+        'simese': 'SIMESE',
+        'cantidad_items': 'Cantidad Items',
+        'monto_total': 'Monto Total',
+        'lote': 'Lote',
+        'item': 'Item',
+        'codigo_insumo': 'Código Insumo',
+        'codigo_servicio': 'Código Servicio',
+        'descripcion': 'Descripción',
+        'cantidad': 'Cantidad',
+        'unidad_medida': 'Unidad Medida',
+        'precio_unitario': 'Precio Unitario',
+        'observaciones': 'Observaciones'
+    }
+    
+    if mapeo_columnas:
+        mapeo_default.update(mapeo_columnas)
+    
+    df_formateado = df.copy()
+    nuevos_nombres = {}
+    for col in df_formateado.columns:
+        col_lower = col.lower()
+        if col_lower in mapeo_default:
+            nuevos_nombres[col] = mapeo_default[col_lower]
+        else:
+            nuevos_nombres[col] = col.replace('_', ' ').title()
+    
+    df_formateado = df_formateado.rename(columns=nuevos_nombres)
+    return df_formateado
+
 def configurar_tabla_usuarios():
     """Crea la tabla de usuarios si no existe"""
     try:
@@ -544,17 +601,6 @@ def main():
         pagina_cambiar_password()
         return
 
-def pagina_cargar_archivo():
-    """Página para cargar un nuevo archivo"""
-    st.header("Cargar Archivo")
-    
-    # Formulario para subir archivo
-    with st.form("upload_form"):
-        st.subheader("📋 Información de la Licitación")
-        
-        # Función para obtener proveedores
-       # Función para obtener proveedores
-
 def obtener_proveedores():
     try:
         with engine.connect() as conn:
@@ -827,6 +873,278 @@ def obtener_proveedores():
                 else:
                     st.error(message)
 
+def pagina_cargar_archivo():
+    """Página para cargar un nuevo archivo"""
+    st.header("Cargar Archivo")
+    
+    # Formulario para subir archivo
+    with st.form("upload_form"):
+        st.subheader("📋 Información de la Licitación")
+        
+        # Campos en el orden solicitado
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            id_licitacion = st.text_input("I.D.:")
+            modalidad = st.text_input("Modalidad:", placeholder="Ej: CD, LP, LC, CO, LPN, CVE, LPI, LCO, MCN...")
+            numero_anio = st.text_input("N° / Año de Modalidad:")
+        
+        with col2:
+            nombre_llamado = st.text_input("Nombre del llamado:")
+            
+            # Autocompletado de proveedores
+            proveedores_existentes = obtener_proveedores()
+            
+            if proveedores_existentes:
+                empresa_options = [f"{p['nombre']} - {p['ruc']}" for p in proveedores_existentes]
+                
+                empresa_seleccionada = st.selectbox(
+                    "Empresa Adjudicada:",
+                    options=["Seleccionar..."] + empresa_options + ["+ Nuevo Proveedor"]
+                )
+                
+                if empresa_seleccionada == "+ Nuevo Proveedor":
+                    st.info("💡 Vaya a 'Gestión de Proveedores' para registrar una nueva empresa")
+                    empresa_adjudicada = st.text_input("Nombre de la empresa:", disabled=True)
+                    ruc = st.text_input("RUC:", disabled=True)
+                elif empresa_seleccionada != "Seleccionar...":
+                    # Extraer datos del proveedor seleccionado
+                    empresa_adjudicada = empresa_seleccionada.split(" - ")[0]
+                    ruc_autocompletado = empresa_seleccionada.split(" - ")[-1]
+                    ruc = st.text_input("RUC:", value=ruc_autocompletado, disabled=True)
+                else:
+                    empresa_adjudicada = ""
+                    ruc = st.text_input("RUC:", disabled=True)
+            else:
+                st.warning("⚠️ No hay proveedores registrados. Registre primero en 'Gestión de Proveedores'")
+                empresa_adjudicada = st.text_input("Empresa Adjudicada:", disabled=True)
+                ruc = st.text_input("RUC:", disabled=True)
+        
+        # Segunda fila de campos
+        col3, col4 = st.columns(2)
+        
+        with col3:
+            vigencia_contrato = st.text_input("Vigencia del Contrato:")
+        
+        with col4:
+            fecha_firma = st.date_input("Fecha de la firma del contrato:")
+        
+        # Otros campos adicionales
+        col5, col6 = st.columns(2)
+        
+        with col5:
+            numero_contrato = st.text_input("Número de contrato/año:")
+        
+        with col6:
+            # Generar sugerencia de nombre de esquema
+            if modalidad and numero_anio:
+                esquema_sugerido = f"{modalidad.strip().lower()}-{numero_anio.strip()}"
+                esquema_personalizado = st.text_input("Nombre del esquema:", value=esquema_sugerido)
+            else:
+                esquema_personalizado = st.text_input("Nombre del esquema:")
+        
+        st.divider()
+        
+        # Campo para subir archivo
+        archivo = st.file_uploader("Seleccionar archivo:", type=["csv", "xlsx", "xls"])
+        
+        # SECCIÓN DE ANÁLISIS DE DATOS
+        if archivo is not None:
+            st.subheader("📊 Análisis del Archivo")
+            
+            # Checkbox para activar análisis
+            mostrar_analisis = st.checkbox("🔍 Mostrar análisis detallado del archivo")
+            
+            if mostrar_analisis:
+                try:
+                    # Determinar el tipo de archivo
+                    extension = archivo.name.split('.')[-1].lower()
+                    
+                    if extension in ['xlsx', 'xls']:
+                        # Análisis para archivos Excel
+                        xls = pd.ExcelFile(archivo)
+                        
+                        st.write(f"**📁 Archivo:** {archivo.name}")
+                        st.write(f"**📄 Tipo:** Excel ({extension.upper()})")
+                        st.write(f"**📋 Hojas encontradas:** {len(xls.sheet_names)}")
+                        
+                        # Mostrar hojas disponibles
+                        col1, col2 = st.columns(2)
+                        
+                        with col1:
+                            st.write("**Hojas en el archivo:**")
+                            for i, sheet in enumerate(xls.sheet_names, 1):
+                                st.write(f"{i}. {sheet}")
+                        
+                        with col2:
+                            # Verificar hojas requeridas
+                            required_sheets = ["ejecucion_general", "ejecucion_por_zonas", "orden_de_compra", "llamado"]
+                            missing_sheets = []
+                            found_sheets = []
+                            
+                            for req_sheet in required_sheets:
+                                found = any(req_sheet.lower() == sheet.lower() for sheet in xls.sheet_names)
+                                if found:
+                                    found_sheets.append(req_sheet)
+                                else:
+                                    missing_sheets.append(req_sheet)
+                            
+                            st.write("**Estado de hojas requeridas:**")
+                            for sheet in found_sheets:
+                                st.write(f"✅ {sheet}")
+                            for sheet in missing_sheets:
+                                st.write(f"❌ {sheet}")
+                        
+                        # Análisis detallado de cada hoja
+                        hoja_analisis = st.selectbox(
+                            "Seleccionar hoja para análisis detallado:",
+                            options=xls.sheet_names
+                        )
+                        
+                        if hoja_analisis:
+                            # Leer una muestra de la hoja seleccionada
+                            df_sample = pd.read_excel(xls, sheet_name=hoja_analisis, nrows=10)
+                            
+                            st.write(f"**📊 Análisis de la hoja '{hoja_analisis}':**")
+                            
+                            # Información básica
+                            col1, col2, col3 = st.columns(3)
+                            with col1:
+                                st.metric("Total Columnas", len(df_sample.columns))
+                            with col2:
+                                # Leer toda la hoja para contar filas (puede ser lento para archivos grandes)
+                                try:
+                                    df_full = pd.read_excel(xls, sheet_name=hoja_analisis)
+                                    st.metric("Total Filas", len(df_full))
+                                except:
+                                    st.metric("Total Filas", "Error al contar")
+                            with col3:
+                                # Contar columnas vacías
+                                empty_cols = df_sample.isnull().all().sum()
+                                st.metric("Columnas Vacías", empty_cols)
+                            
+                            # Mostrar nombres de columnas
+                            st.write("**Columnas encontradas:**")
+                            cols_text = ", ".join(df_sample.columns.tolist())
+                            st.text_area("Lista de columnas:", value=cols_text, height=100, disabled=True)
+                            
+                            # Mostrar muestra de datos
+                            st.write("**Muestra de datos (primeras 10 filas):**")
+                            st.dataframe(df_sample)
+                            
+                            # Verificar tipos de datos
+                            st.write("**Tipos de datos por columna:**")
+                            tipos_df = pd.DataFrame({
+                                'Columna': df_sample.columns,
+                                'Tipo': df_sample.dtypes.values,
+                                'Valores Nulos': df_sample.isnull().sum().values,
+                                'Valores Únicos': df_sample.nunique().values
+                            })
+                            st.dataframe(tipos_df)
+                    
+                    elif extension == 'csv':
+                        # Análisis para archivos CSV
+                        contenido = archivo.getvalue().decode('utf-8')
+                        df_sample = pd.read_csv(io.StringIO(contenido), nrows=10)
+                        
+                        st.write(f"**📁 Archivo:** {archivo.name}")
+                        st.write(f"**📄 Tipo:** CSV")
+                        
+                        # Información básica
+                        col1, col2, col3 = st.columns(3)
+                        with col1:
+                            st.metric("Total Columnas", len(df_sample.columns))
+                        with col2:
+                            try:
+                                df_full = pd.read_csv(io.StringIO(contenido))
+                                st.metric("Total Filas", len(df_full))
+                            except:
+                                st.metric("Total Filas", "Error al contar")
+                        with col3:
+                            empty_cols = df_sample.isnull().all().sum()
+                            st.metric("Columnas Vacías", empty_cols)
+                        
+                        st.write("**Columnas encontradas:**")
+                        cols_text = ", ".join(df_sample.columns.tolist())
+                        st.text_area("Lista de columnas:", value=cols_text, height=100, disabled=True)
+                        
+                        st.write("**Muestra de datos (primeras 10 filas):**")
+                        st.dataframe(df_sample)
+                    
+                    # Mensaje de estado
+                    if extension in ['xlsx', 'xls'] and 'missing_sheets' in locals() and missing_sheets:
+                        st.warning(f"⚠️ Faltan las siguientes hojas requeridas: {', '.join(missing_sheets)}")
+                        st.info("El sistema puede intentar generar automáticamente algunas hojas faltantes.")
+                    else:
+                        st.success("✅ El archivo parece tener la estructura correcta para ser procesado.")
+                
+                except Exception as e:
+                    st.error(f"Error al analizar el archivo: {str(e)}")
+            
+            # Separador visual
+            st.divider()
+        
+        # BOTONES DEL FORMULARIO - SIEMPRE VISIBLES
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            # Botón para procesar - siempre visible
+            submit = st.form_submit_button("🚀 Procesar y Cargar Archivo", type="primary", disabled=(archivo is None))
+        
+        with col2:
+            # Botón para limpiar - siempre visible
+            limpiar = st.form_submit_button("🗑️ Limpiar Formulario", type="secondary")
+        
+        # Procesar según el botón presionado
+        if limpiar:
+            # Limpiar estado del formulario
+            st.rerun()
+        
+        elif submit:
+            if not archivo:
+                st.error("Por favor, seleccione un archivo Excel o CSV.")
+            elif not id_licitacion or not modalidad or not numero_anio or not nombre_llamado or not empresa_adjudicada or not vigencia_contrato or not numero_contrato:
+                st.error("Por favor, complete todos los campos obligatorios.")
+            else:
+                # Usar el esquema personalizado
+                esquema = esquema_personalizado
+                empresa_para_tablas = empresa_adjudicada.strip().upper().replace(" ", "_")
+                
+                # Crear diccionario con datos del formulario
+                datos_formulario = {
+                    'id_licitacion': id_licitacion,
+                    'modalidad': modalidad,
+                    'numero_anio': numero_anio,
+                    'nombre_llamado': nombre_llamado,
+                    'empresa_adjudicada': empresa_adjudicada,
+                    'ruc': ruc,
+                    'fecha_firma': fecha_firma,
+                    'numero_contrato': numero_contrato,
+                    'vigencia_contrato': vigencia_contrato
+                }
+                
+                # Procesar el archivo con el prefijo de empresa en las tablas
+                with st.spinner("Procesando archivo y creando tablas..."):
+                    success, message = cargar_archivo_a_postgres(
+                        archivo,
+                        archivo.name,
+                        esquema,
+                        empresa_para_tablas,  # Pasar la empresa como parámetro adicional
+                        datos_formulario  # Pasar datos del formulario
+                    )
+                
+                if success:
+                    st.success(f"Archivo cargado correctamente en el esquema '{esquema}' con tablas de empresa '{empresa_para_tablas}'")
+                    st.balloons()
+                    registrar_actividad(
+                        accion="CREATE",
+                        modulo="LICITACIONES",
+                        descripcion=f"Archivo cargado: {archivo.name} en esquema {esquema}",
+                        esquema_afectado=esquema
+                    )
+                else:
+                    st.error(message)
+
 def pagina_ver_cargas():
     """Página para ver las cargas realizadas"""
     st.header("Archivos Cargados")
@@ -873,6 +1191,9 @@ def pagina_ver_cargas():
         if 'fecha_carga' in df_archivos.columns:
             df_archivos['fecha_carga'] = pd.to_datetime(df_archivos['fecha_carga']).dt.strftime('%Y-%m-%d %H:%M')
         
+        # Formatear columnas para el usuario final
+        df_archivos_formateado = formatear_columnas_tabla(df_archivos)
+        
         # Colorear estado
         def colorear_estado(estado):
             if estado == 'Activo':
@@ -883,10 +1204,10 @@ def pagina_ver_cargas():
                 return ''
         
         # Aplicar estilo condicional
-        df_styled = df_archivos.style.applymap(colorear_estado, subset=['estado'])
+        df_styled = df_archivos_formateado.style.applymap(colorear_estado, subset=['Estado'])
         
         # Mostrar DataFrame
-        st.dataframe(df_styled)
+        st.dataframe(df_styled, use_container_width=True)
         
         # Ofrecer descarga del contenido original si está activo
         archivos_activos = [a for a in archivos if a['estado'] == 'Activo']
@@ -905,7 +1226,7 @@ def pagina_ver_cargas():
                     with engine.connect() as conn:
                         query = text("""
                             SELECT contenido_original
-                            FROM archivos_cargados
+                            FROM reactivos_py.archivos_cargados
                             WHERE id = :id
                         """)
                         
@@ -960,7 +1281,10 @@ def pagina_gestionar_proveedores():
     st.header("Gestión de Proveedores")
     
     # Pestañas para diferentes funciones
-    tab1, tab2, tab3 = st.tabs(["Lista de Proveedores", "Nuevo Proveedor", "Importar CSV"])
+    if st.session_state.user_role == 'admin':
+        tab1, tab2, tab3, tab4 = st.tabs(["Lista de Proveedores", "Nuevo Proveedor", "Importar CSV", "Admin - Eliminar"])
+    else:
+        tab1, tab2, tab3 = st.tabs(["Lista de Proveedores", "Nuevo Proveedor", "Importar CSV"])
     
     with tab1:
         st.subheader("Proveedores Registrados")
@@ -1027,7 +1351,8 @@ def pagina_gestionar_proveedores():
                         df_proveedores['fecha_actualizacion'] = pd.to_datetime(df_proveedores['fecha_actualizacion']).dt.strftime('%Y-%m-%d %H:%M')
                     
                     # Mostrar proveedores
-                    st.dataframe(df_proveedores, use_container_width=True)
+                    df_proveedores_formateado = formatear_columnas_tabla(df_proveedores)
+                    st.dataframe(df_proveedores_formateado, use_container_width=True)
                     
                     # NUEVA SECCIÓN: Editar Proveedor
                     st.divider()
@@ -1066,12 +1391,78 @@ def pagina_gestionar_proveedores():
                                 
                                 observaciones = st.text_area("Observaciones:")
                                 
-                                col_btn1, col_btn2 = st.columns(2)
+                                # Botones de acción
+                                col_btn1, col_btn2, col_btn3 = st.columns(3)
                                 with col_btn1:
                                     actualizar = st.form_submit_button("💾 Actualizar Proveedor", type="primary")
                                 with col_btn2:
                                     cambiar_estado = st.form_submit_button("🔄 Cambiar Estado", type="secondary")
+                                with col_btn3:
+                                    eliminar = st.form_submit_button("🗑️ Eliminar Proveedor", type="secondary", help="Esta acción eliminará permanentemente el proveedor")
                                 
+                                # Procesar eliminación
+                                if eliminar:
+                                    try:
+                                        with engine.connect() as conn:
+                                            # Verificar si está en uso en órdenes de compra
+                                            query_check_uso = text("""
+                                                SELECT COUNT(*) FROM reactivos_py.ordenes_compra oc
+                                                JOIN reactivos_py.items_orden_compra ioc ON oc.id = ioc.orden_compra_id
+                                                WHERE oc.esquema IN (
+                                                    SELECT esquema FROM reactivos_py.archivos_cargados 
+                                                    WHERE estado = 'Activo'
+                                                )
+                                            """)
+                                            
+                                            result_oc = conn.execute(query_check_uso)
+                                            ordenes_relacionadas = result_oc.scalar() or 0
+                                            
+                                            if ordenes_relacionadas > 0:
+                                                st.error(f"❌ No se puede eliminar el proveedor '{proveedor['razon_social']}' porque está relacionado con {ordenes_relacionadas} órdenes de compra.")
+                                                st.info("💡 Sugerencia: Puede marcarlo como 'inactivo' en lugar de eliminarlo.")
+                                            else:
+                                                # Si no está en uso, mostrar confirmación
+                                                st.warning("⚠️ **CONFIRMACIÓN REQUERIDA**")
+                                                confirmar_eliminacion = st.checkbox(
+                                                    f"Confirmo que deseo eliminar permanentemente a '{proveedor['razon_social']}' (RUC: {proveedor['ruc']})",
+                                                    key=f"confirm_delete_{proveedor['id']}"
+                                                )
+                                                
+                                                if confirmar_eliminacion:
+                                                    if st.button("✅ SÍ, ELIMINAR DEFINITIVAMENTE", type="primary"):
+                                                        try:
+                                                            # Proceder con la eliminación
+                                                            query_delete = text("DELETE FROM reactivos_py.proveedores WHERE id = :id")
+                                                            conn.execute(query_delete, {'id': proveedor['id']})
+                                                            
+                                                            # Registrar actividad de eliminación
+                                                            registrar_actividad(
+                                                                accion="DELETE",
+                                                                modulo="PROVEEDORES",
+                                                                descripcion=f"Proveedor eliminado: {proveedor['razon_social']} (RUC: {proveedor['ruc']})",
+                                                                valores_anteriores={
+                                                                    'id': proveedor['id'],
+                                                                    'ruc': proveedor['ruc'],
+                                                                    'razon_social': proveedor['razon_social'],
+                                                                    'direccion': proveedor['direccion'],
+                                                                    'correo_electronico': proveedor['correo_electronico']
+                                                                }
+                                                            )
+                                                            
+                                                            st.success(f"✅ Proveedor '{proveedor['razon_social']}' eliminado correctamente")
+                                                            st.balloons()
+                                                            time.sleep(2)
+                                                            st.rerun()
+                                                            
+                                                        except Exception as e:
+                                                            st.error(f"Error al eliminar proveedor: {e}")
+                                                else:
+                                                    st.info("👆 Active la confirmación y presione el botón rojo para proceder")
+                                                    
+                                    except Exception as e:
+                                        st.error(f"Error verificando uso del proveedor: {e}")
+                                
+                                # Procesar actualización
                                 if actualizar:
                                     try:
                                         with engine.connect() as conn:
@@ -1119,6 +1510,7 @@ def pagina_gestionar_proveedores():
                                     except Exception as e:
                                         st.error(f"Error al actualizar proveedor: {e}")
                                 
+                                # Procesar cambio de estado
                                 if cambiar_estado:
                                     try:
                                         nuevo_estado = not activo_actual
@@ -1221,10 +1613,6 @@ def pagina_gestionar_proveedores():
             st.write(f"**Tamaño:** {archivo_csv.size} bytes")
             
             # Botón para analizar archivo
-            # REEMPLAZAR LA SECCIÓN DE ANÁLISIS CSV EN pagina_gestionar_proveedores()
-
-            # En la función pagina_gestionar_proveedores(), tab3, reemplazar el botón "🔍 Analizar Archivo":
-
             if st.button("🔍 Analizar Archivo"):
                 try:
                     # Función mejorada para leer CSV completo
@@ -1263,7 +1651,7 @@ def pagina_gestionar_proveedores():
                                             mejor_config = (delimiter, encoding)
                                             max_filas = len(df_temp)
                                     
-                                except Exception as e:
+                                except Exception:
                                     continue
                         
                         return mejor_df, mejor_config
@@ -1282,9 +1670,9 @@ def pagina_gestionar_proveedores():
                     st.success(f"✅ Archivo leído correctamente (Delimitador: '{delimiter_usado}', Encoding: {encoding_usado})")
                     
                     # Limpiar DataFrame
-                    df_original = df.copy()  # Guardar original para debugging
-                    df = df.dropna(how='all')  # Eliminar filas completamente vacías
-                    df = df.fillna('')  # Rellenar NaN con strings vacíos
+                    df_original = df.copy()
+                    df = df.dropna(how='all')
+                    df = df.fillna('')
                     
                     # Información detallada del archivo
                     st.write("### 📊 Información del Archivo")
@@ -1297,108 +1685,8 @@ def pagina_gestionar_proveedores():
                     with col3:
                         st.metric("📋 Columnas", len(df.columns))
                     with col4:
-                        # Contar celdas con datos
                         celdas_con_datos = df.astype(str).ne('').sum().sum()
                         st.metric("📊 Celdas con Datos", celdas_con_datos)
-                    
-                    # Mostrar detalles del archivo
-                    st.write("**📄 Detalles del Archivo:**")
-                    st.write(f"• **Nombre:** {archivo_csv.name}")
-                    st.write(f"• **Tamaño:** {archivo_csv.size:,} bytes")
-                    st.write(f"• **Delimitador usado:** '{delimiter_usado}'")
-                    st.write(f"• **Encoding usado:** {encoding_usado}")
-                    st.write(f"• **Filas procesadas:** {len(df):,}")
-                    st.write(f"• **Columnas detectadas:** {len(df.columns)}")
-                    
-                    # Análisis de calidad de datos
-                    st.write("### 🔍 Análisis de Calidad de Datos")
-                    
-                    # Estadísticas por columna
-                    estadisticas = []
-                    for col in df.columns:
-                        no_vacias = df[col].astype(str).ne('').sum()
-                        unicas = df[col].nunique()
-                        estadisticas.append({
-                            'Columna': col,
-                            'Valores No Vacíos': no_vacias,
-                            'Valores Únicos': unicas,
-                            'Porcentaje Completitud': f"{(no_vacias/len(df)*100):.1f}%"
-                        })
-                    
-                    df_stats = pd.DataFrame(estadisticas)
-                    st.dataframe(df_stats, use_container_width=True)
-                    
-                    # Verificar si tiene estructura típica de proveedores
-                    posible_ruc = False
-                    posible_razon = False
-                    
-                    for col in df.columns:
-                        col_lower = str(col).lower()
-                        # Buscar columnas que podrían ser RUC
-                        if any(palabra in col_lower for palabra in ['ruc', 'rut', 'cuit', 'nit', 'cedula', 'documento']):
-                            posible_ruc = True
-                        # Buscar columnas que podrían ser razón social
-                        if any(palabra in col_lower for palabra in ['razon', 'nombre', 'empresa', 'social', 'denominacion']):
-                            posible_razon = True
-                    
-                    if posible_ruc and posible_razon:
-                        st.success("✅ El archivo parece tener estructura de proveedores (RUC y Razón Social detectados)")
-                    elif len(df.columns) >= 2:
-                        st.warning("⚠️ Estructura no reconocida automáticamente, pero tiene al menos 2 columnas")
-                    else:
-                        st.error("❌ El archivo no tiene estructura suficiente para importar proveedores")
-                    
-                    # Mostrar vista previa de datos
-                    st.write("### 👀 Vista Previa de Datos")
-                    
-                    # Selector para ver diferentes partes del archivo
-                    vista_opcion = st.selectbox(
-                        "Seleccionar vista:",
-                        ["Primeras 20 filas", "Filas del medio", "Últimas 20 filas", "Muestra aleatoria"]
-                    )
-                    
-                    if vista_opcion == "Primeras 20 filas":
-                        st.dataframe(df.head(20))
-                    elif vista_opcion == "Filas del medio":
-                        medio = len(df) // 2
-                        st.dataframe(df.iloc[medio-10:medio+10])
-                    elif vista_opcion == "Últimas 20 filas":
-                        st.dataframe(df.tail(20))
-                    else:  # Muestra aleatoria
-                        if len(df) > 20:
-                            muestra = df.sample(min(20, len(df)))
-                            st.dataframe(muestra)
-                        else:
-                            st.dataframe(df)
-                    
-                    # Detectar posibles problemas
-                    st.write("### ⚠️ Detección de Problemas")
-                    
-                    problemas = []
-                    
-                    # Verificar filas completamente vacías
-                    filas_vacias = len(df_original) - len(df)
-                    if filas_vacias > 0:
-                        problemas.append(f"Se encontraron {filas_vacias} filas completamente vacías (fueron eliminadas)")
-                    
-                    # Verificar columnas con muchos valores vacíos
-                    for col in df.columns:
-                        vacios = df[col].astype(str).eq('').sum()
-                        if vacios > len(df) * 0.5:  # Más del 50% vacío
-                            problemas.append(f"Columna '{col}' tiene {vacios} valores vacíos ({(vacios/len(df)*100):.1f}%)")
-                    
-                    # Verificar duplicados en primera columna (posible RUC)
-                    if len(df.columns) > 0:
-                        primera_col = df.columns[0]
-                        duplicados = df[primera_col].duplicated().sum()
-                        if duplicados > 0:
-                            problemas.append(f"Se encontraron {duplicados} valores duplicados en '{primera_col}'")
-                    
-                    if problemas:
-                        for problema in problemas:
-                            st.warning(f"⚠️ {problema}")
-                    else:
-                        st.success("✅ No se detectaron problemas obvios en los datos")
                     
                     # Guardar DataFrame procesado en session_state
                     st.session_state.df_importar = df
@@ -1411,125 +1699,55 @@ def pagina_gestionar_proveedores():
                     
                 except Exception as e:
                     st.error(f"❌ Error al procesar el archivo: {e}")
-                    st.write("**Detalles del error para debugging:**")
-                    st.code(str(e))
-
-            # TAMBIÉN AGREGAR ESTA MEJORA AL PROCESO DE IMPORTACIÓN
-            # Reemplazar la parte donde se procesa el DataFrame en la importación:
-
-            # En el botón "🚀 Importar Proveedores", después de obtener el DataFrame:
+            
+            # Mostrar mapeo y importación si el DataFrame está disponible
             if 'df_importar' in st.session_state:
                 df = st.session_state.df_importar
                 
                 st.divider()
                 st.subheader("🗂️ Mapeo de Columnas")
                 
-                st.info(f"📊 **Datos a procesar:** {len(df):,} filas con {st.session_state.celdas_con_datos:,} celdas con datos")
-                
-                # Mapear columnas con autodetección mejorada
-                col1, col2 = st.columns(2)
-                
                 # Autodetección inteligente de columnas
                 def detectar_columna_ruc(columnas):
                     for i, col in enumerate(columnas):
                         col_lower = str(col).lower()
-                        if any(palabra in col_lower for palabra in ['ruc', 'rut', 'cuit', 'nit', 'documento', 'identificacion']):
+                        if any(palabra in col_lower for palabra in ['ruc', 'rut', 'cuit', 'nit', 'documento']):
                             return i
-                    return 0  # Por defecto la primera
+                    return 0
                 
                 def detectar_columna_razon(columnas):
                     for i, col in enumerate(columnas):
                         col_lower = str(col).lower()
-                        if any(palabra in col_lower for palabra in ['razon', 'nombre', 'empresa', 'social', 'denominacion']):
+                        if any(palabra in col_lower for palabra in ['razon', 'nombre', 'empresa', 'social']):
                             return i
-                    return 1 if len(columnas) > 1 else 0  # Por defecto la segunda
-                
-                def detectar_columna_direccion(columnas):
-                    for i, col in enumerate(columnas):
-                        col_lower = str(col).lower()
-                        if any(palabra in col_lower for palabra in ['direccion', 'domicilio', 'ubicacion', 'address']):
-                            return i
-                    return None
-                
-                def detectar_columna_correo(columnas):
-                    for i, col in enumerate(columnas):
-                        col_lower = str(col).lower()
-                        if any(palabra in col_lower for palabra in ['correo', 'email', 'mail', 'electronico']):
-                            return i
-                    return None
+                    return 1 if len(columnas) > 1 else 0
                 
                 ruc_idx = detectar_columna_ruc(df.columns.tolist())
                 razon_idx = detectar_columna_razon(df.columns.tolist())
-                direccion_idx = detectar_columna_direccion(df.columns.tolist())
-                correo_idx = detectar_columna_correo(df.columns.tolist())
                 
+                col1, col2 = st.columns(2)
                 with col1:
                     col_ruc = st.selectbox("Columna RUC:", options=df.columns.tolist(), index=ruc_idx)
                     col_razon = st.selectbox("Columna Razón Social:", options=df.columns.tolist(), index=razon_idx)
                 
                 with col2:
                     opciones_direccion = ["No mapear"] + df.columns.tolist()
-                    col_direccion = st.selectbox(
-                        "Columna Dirección (opcional):", 
-                        options=opciones_direccion, 
-                        index=(direccion_idx + 1) if direccion_idx is not None else 0
-                    )
+                    col_direccion = st.selectbox("Columna Dirección (opcional):", options=opciones_direccion)
                     
                     opciones_correo = ["No mapear"] + df.columns.tolist()
-                    col_correo = st.selectbox(
-                        "Columna Correo (opcional):", 
-                        options=opciones_correo,
-                        index=(correo_idx + 1) if correo_idx is not None else 0
-                    )
-                
-                # Vista previa del mapeo con más filas
-                st.write("**🔍 Vista previa del mapeo (primeras 10 filas):**")
-                preview_data = []
-                for i in range(min(10, len(df))):
-                    preview_data.append({
-                        'Fila': i + 1,
-                        'RUC': str(df.iloc[i][col_ruc])[:50],  # Limitar caracteres mostrados
-                        'Razón Social': str(df.iloc[i][col_razon])[:50],
-                        'Dirección': str(df.iloc[i][col_direccion])[:50] if col_direccion != "No mapear" else "No mapeado",
-                        'Correo': str(df.iloc[i][col_correo])[:50] if col_correo != "No mapear" else "No mapeado"
-                    })
-                
-                st.dataframe(pd.DataFrame(preview_data))
+                    col_correo = st.selectbox("Columna Correo (opcional):", options=opciones_correo)
                 
                 # Análisis de datos antes de importar
-                st.write("**📊 Análisis Pre-Importación:**")
-                
-                col1, col2, col3 = st.columns(3)
-                
-                with col1:
-                    # Contar registros con RUC válido
-                    rucs_validos = df[col_ruc].astype(str).str.strip().ne('').sum()
-                    st.metric("RUCs Válidos", f"{rucs_validos:,}")
-                
-                with col2:
-                    # Contar registros con razón social válida
-                    razones_validas = df[col_razon].astype(str).str.strip().ne('').sum()
-                    st.metric("Razones Sociales Válidas", f"{razones_validas:,}")
-                
-                with col3:
-                    # Estimar registros a procesar
-                    registros_procesables = df[(df[col_ruc].astype(str).str.strip().ne('')) & 
-                                             (df[col_razon].astype(str).str.strip().ne(''))].shape[0]
-                    st.metric("Registros Procesables", f"{registros_procesables:,}")
-                
-                # Mostrar estadísticas de duplicados
-                if registros_procesables > 0:
-                    duplicados_ruc = df[col_ruc].astype(str).str.strip().duplicated().sum()
-                    if duplicados_ruc > 0:
-                        st.warning(f"⚠️ Se detectaron {duplicados_ruc} RUCs duplicados en el archivo")
+                registros_procesables = df[(df[col_ruc].astype(str).str.strip().ne('')) & 
+                                         (df[col_razon].astype(str).str.strip().ne(''))].shape[0]
                 
                 # Checkbox para confirmar importación
                 confirmar_importacion = st.checkbox(
                     f"Confirmo la importación de {registros_procesables:,} registros procesables",
                     help="Esta acción insertará todos los registros válidos en la base de datos"
                 )
-
-                # Después del checkbox confirmar_importacion, agregar:
+                
+                # Importación
                 if confirmar_importacion:
                     if st.button("🚀 Importar Proveedores", type="primary"):
                         try:
@@ -1604,17 +1822,8 @@ def pagina_gestionar_proveedores():
                             with col3:
                                 st.metric("❌ Errores", errores)
                             
-                            if errores_detalle:
-                                with st.expander(f"📋 Detalles ({len(errores_detalle)} issues)"):
-                                    for detalle in errores_detalle:
-                                        if "duplicado" in detalle.lower() or "ya existe" in detalle.lower():
-                                            st.warning(detalle)
-                                        else:
-                                            st.error(detalle)
-                            
                             if insertados > 0:
                                 st.success(f"✅ Importación completada: {insertados} nuevos registros")
-                                # ← MOVER EL registrar_actividad AQUÍ
                                 registrar_actividad(
                                     accion="IMPORT",
                                     modulo="PROVEEDORES",
@@ -1628,6 +1837,87 @@ def pagina_gestionar_proveedores():
                                 
                         except Exception as e:
                             st.error(f"Error durante la importación: {e}")
+    
+    # Pestaña de administración (solo para admin)
+    if st.session_state.user_role == 'admin':
+        with tab4:
+            eliminar_proveedor_bulk()
+
+def eliminar_proveedor_bulk():
+    """Función para eliminar múltiples proveedores (admin only)"""
+    if st.session_state.user_role != 'admin':
+        st.error("❌ Solo administradores pueden realizar eliminaciones masivas")
+        return
+    
+    st.subheader("🗑️ Eliminación Masiva de Proveedores")
+    st.warning("⚠️ **FUNCIÓN ADMINISTRATIVA** - Use con extrema precaución")
+    
+    try:
+        with engine.connect() as conn:
+            # Obtener proveedores inactivos sin uso
+            query = text("""
+                SELECT p.id, p.ruc, p.razon_social, p.fecha_registro
+                FROM reactivos_py.proveedores p
+                WHERE p.activo = FALSE
+                AND NOT EXISTS (
+                    SELECT 1 FROM reactivos_py.ordenes_compra oc
+                    JOIN reactivos_py.items_orden_compra ioc ON oc.id = ioc.orden_compra_id
+                    WHERE oc.esquema IN (
+                        SELECT esquema FROM reactivos_py.archivos_cargados 
+                        WHERE estado = 'Activo'
+                    )
+                )
+                ORDER BY p.fecha_registro DESC
+            """)
+            
+            result = conn.execute(query)
+            proveedores_eliminables = [
+                {'id': row[0], 'ruc': row[1], 'razon_social': row[2], 'fecha_registro': row[3]}
+                for row in result
+            ]
+            
+            if proveedores_eliminables:
+                st.info(f"📊 Se encontraron {len(proveedores_eliminables)} proveedores inactivos sin uso que pueden eliminarse:")
+                
+                # Mostrar lista
+                df_eliminables = pd.DataFrame(proveedores_eliminables)
+                df_eliminables['fecha_registro'] = pd.to_datetime(df_eliminables['fecha_registro']).dt.strftime('%Y-%m-%d')
+                df_eliminables_formateado = formatear_columnas_tabla(df_eliminables)
+                st.dataframe(df_eliminables_formateado, use_container_width=True)
+                
+                # Opción de eliminación masiva
+                if st.checkbox("Confirmo que deseo eliminar TODOS los proveedores inactivos listados"):
+                    if st.button("🗑️ ELIMINAR TODOS LOS INACTIVOS", type="primary"):
+                        try:
+                            eliminados = 0
+                            for proveedor in proveedores_eliminables:
+                                query_delete = text("DELETE FROM reactivos_py.proveedores WHERE id = :id")
+                                conn.execute(query_delete, {'id': proveedor['id']})
+                                eliminados += 1
+                            
+                            # Registrar actividad masiva
+                            registrar_actividad(
+                                accion="DELETE",
+                                modulo="PROVEEDORES",
+                                descripcion=f"Eliminación masiva: {eliminados} proveedores inactivos eliminados",
+                                detalles={
+                                    'cantidad_eliminados': eliminados,
+                                    'tipo': 'eliminacion_masiva_inactivos'
+                                }
+                            )
+                            
+                            st.success(f"✅ {eliminados} proveedores eliminados correctamente")
+                            st.balloons()
+                            time.sleep(2)
+                            st.rerun()
+                            
+                        except Exception as e:
+                            st.error(f"Error en eliminación masiva: {e}")
+            else:
+                st.info("✅ No hay proveedores inactivos sin uso para eliminar")
+                
+    except Exception as e:
+        st.error(f"Error obteniendo proveedores eliminables: {e}")
 
 def pagina_administrar_usuarios():
     """Página para administrar usuarios"""
@@ -1656,8 +1946,8 @@ def pagina_administrar_usuarios():
                         'id': row[0],
                         'cedula': row[1],
                         'username': row[2],
-                        'nombre': row[3],
-                        'rol': row[4],
+                        'nombre_completo': row[3],
+                        'role': row[4],
                         'fecha_creacion': row[5],
                         'ultimo_cambio_password': row[6]
                     })
@@ -1672,8 +1962,11 @@ def pagina_administrar_usuarios():
                     if 'ultimo_cambio_password' in df_usuarios.columns:
                         df_usuarios['ultimo_cambio_password'] = pd.to_datetime(df_usuarios['ultimo_cambio_password']).dt.strftime('%Y-%m-%d %H:%M')
                     
+                    # Formatear columnas para el usuario final
+                    df_usuarios_formateado = formatear_columnas_tabla(df_usuarios)
+                    
                     # Mostrar usuarios
-                    st.dataframe(df_usuarios)
+                    st.dataframe(df_usuarios_formateado, use_container_width=True)
                     
                     # Selector para editar usuario
                     usuario_a_editar = st.selectbox(
@@ -1689,11 +1982,11 @@ def pagina_administrar_usuarios():
                             
                             # Campos para editar
                             cedula = st.text_input("Cédula de Identidad:", value=usuario['cedula'])
-                            nombre = st.text_input("Nombre completo:", value=usuario['nombre'])
+                            nombre = st.text_input("Nombre completo:", value=usuario['nombre_completo'])
                             rol = st.selectbox(
                                 "Rol:",
                                 options=["admin", "user"],
-                                index=0 if usuario['rol'] == "admin" else 1
+                                index=0 if usuario['role'] == "admin" else 1
                             )
                             reset_password = st.checkbox("Resetear contraseña")
                             new_password = st.text_input("Nueva contraseña:", type="password") if reset_password else None
@@ -1903,8 +2196,19 @@ def pagina_historial_actividades():
         df_actividades = pd.DataFrame(actividades)
         df_actividades['fecha_hora'] = pd.to_datetime(df_actividades['fecha_hora']).dt.strftime('%Y-%m-%d %H:%M:%S')
         
-        df_display = df_actividades[['fecha_hora', 'usuario', 'modulo', 'accion', 'descripcion', 'esquema_afectado']].copy()
-        df_display.columns = ['Fecha/Hora', 'Usuario', 'Módulo', 'Acción', 'Descripción', 'Esquema']
+        # Formatear columnas usando la función de formateo
+        df_actividades_formateado = formatear_columnas_tabla(df_actividades, {
+            'fecha_hora': 'Fecha/Hora',
+            'usuario': 'Usuario',
+            'modulo': 'Módulo',
+            'accion': 'Acción',
+            'descripcion': 'Descripción',
+            'esquema_afectado': 'Esquema Afectado'
+        })
+        
+        # Seleccionar solo las columnas que queremos mostrar
+        columnas_mostrar = ['Fecha/Hora', 'Usuario', 'Módulo', 'Acción', 'Descripción', 'Esquema Afectado']
+        df_display = df_actividades_formateado[columnas_mostrar]
         
         def colorear_accion(val):
             if val == 'CREATE':
@@ -1970,6 +2274,40 @@ def pagina_historial_actividades():
             )
     else:
         st.info("No se encontraron actividades con los filtros aplicados.")
+    
+    # Estadísticas del sistema
+    with st.expander("📊 Estadísticas del Sistema"):
+        try:
+            with engine.connect() as conn:
+                # Actividades por usuario
+                query = text("""
+                    SELECT usuario_nombre, COUNT(*) as total
+                    FROM reactivos_py.auditoria
+                    GROUP BY usuario_nombre
+                    ORDER BY total DESC
+                    LIMIT 10
+                """)
+                result = conn.execute(query)
+                
+                st.write("**Top 10 Usuarios más Activos:**")
+                for row in result:
+                    st.write(f"• {row[0]}: {row[1]} actividades")
+                
+                # Actividades por módulo
+                query = text("""
+                    SELECT modulo, COUNT(*) as total
+                    FROM reactivos_py.auditoria
+                    GROUP BY modulo
+                    ORDER BY total DESC
+                """)
+                result = conn.execute(query)
+                
+                st.write("**Actividades por Módulo:**")
+                for row in result:
+                    st.write(f"• {row[0]}: {row[1]} actividades")
+                    
+        except Exception as e:
+            st.error(f"Error obteniendo estadísticas: {e}")
 
 def pagina_cambiar_password():
     """Página para cambiar contraseña del usuario actual"""
@@ -3576,4 +3914,174 @@ def pagina_ordenes_compra():
                             # Mostrar DataFrame
                             st.dataframe(df_display)
                             
-                            # Mostrar
+                            # Mostrar monto total
+                            monto_total = sum(item['monto_total'] for item in st.session_state.items_seleccionados)
+                            st.subheader(f"Monto Total: ₲ {monto_total:,.0f}".replace(",", "."))
+                            
+                            # Botón para limpiar lista
+                            if st.form_submit_button("Limpiar Lista"):
+                                st.session_state.items_seleccionados = []
+                                st.rerun()
+                        
+                        submit_disabled = len(st.session_state.items_seleccionados) == 0
+                    
+                    # Botón para emitir orden
+                    submit = st.form_submit_button("Emitir Orden de Compra", disabled=submit_disabled)
+                    
+                    if submit and st.session_state.items_seleccionados:
+                        # Validar datos
+                        if not numero_orden:
+                            st.error("Debe ingresar un número de orden.")
+                        elif not simese:
+                            st.error("Debe ingresar un número de SIMESE.")
+                        else:
+                            # Crear orden de compra
+                            success, message, orden_id = crear_orden_compra(
+                                esquema_seleccionado,
+                                numero_orden,
+                                fecha_emision,
+                                servicio_seleccionado,
+                                simese,
+                                st.session_state.items_seleccionados
+                            )
+                            
+                            if success:
+                                st.success(message)
+                                # Limpiar estado
+                                st.session_state.items_seleccionados = []
+                                # Mostrar botón para ver la orden
+                                if st.button("Ver Orden Creada"):
+                                    st.session_state.orden_seleccionada = orden_id
+                                    st.session_state.menu = "ordenes_compra"
+                                    st.rerun()
+                            else:
+                                st.error(message)
+            else:
+                st.warning(f"No hay servicios beneficiarios definidos para la licitación seleccionada.")
+        else:
+            st.info("Seleccione una licitación para emitir una orden de compra.")
+
+    with tab1:
+        st.subheader("Órdenes de Compra Emitidas")
+        
+        # Opción para filtrar por esquema
+        esquemas = obtener_esquemas_postgres()
+        esquema_seleccionado = st.selectbox(
+            "Filtrar por esquema:",
+            options=["Todos"] + esquemas,
+            index=0
+        )
+        
+        # Obtener órdenes de compra
+        if esquema_seleccionado == "Todos":
+            ordenes = obtener_ordenes_compra()
+        else:
+            ordenes = obtener_ordenes_compra(esquema_seleccionado)
+        
+        if ordenes:
+            # Convertir a DataFrame para mejor visualización
+            df_ordenes = pd.DataFrame(ordenes)
+            
+            # Dar formato a las fechas
+            if 'fecha_emision' in df_ordenes.columns:
+                df_ordenes['fecha_emision'] = pd.to_datetime(df_ordenes['fecha_emision']).dt.strftime('%Y-%m-%d')
+            if 'fecha_creacion' in df_ordenes.columns:
+                df_ordenes['fecha_creacion'] = pd.to_datetime(df_ordenes['fecha_creacion']).dt.strftime('%Y-%m-%d %H:%M')
+            
+            # Dar formato al monto total
+            if 'monto_total' in df_ordenes.columns:
+                df_ordenes['monto_total'] = df_ordenes['monto_total'].apply(lambda x: f"₲ {x:,.0f}".replace(",", "."))
+            
+            # Mostrar órdenes
+            st.dataframe(df_ordenes)
+            
+            # Selector para ver detalles de una orden
+            ordenes_ids = {f"{o['numero_orden']} - {o['servicio_beneficiario']}": o['id'] for o in ordenes}
+            selected_orden = st.selectbox(
+                "Seleccionar orden para ver detalles:",
+                options=list(ordenes_ids.keys())
+            )
+            
+            if selected_orden:
+                orden_id = ordenes_ids[selected_orden]
+                orden = obtener_detalles_orden_compra(orden_id)
+                
+                if orden:
+                    st.subheader(f"Detalles de Orden de Compra: {orden['numero_orden']}")
+                    
+                    # Mostrar datos de cabecera
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        st.write(f"**Fecha Emisión:** {orden['fecha_emision'].strftime('%Y-%m-%d')}")
+                        st.write(f"**Servicio Beneficiario:** {orden['servicio_beneficiario']}")
+                        st.write(f"**SIMESE:** {orden['simese']}")
+                    with col2:
+                        st.write(f"**Estado:** {orden['estado']}")
+                        st.write(f"**Usuario:** {orden['usuario_nombre']} ({orden['usuario']})")
+                        st.write(f"**Fecha Creación:** {orden['fecha_creacion'].strftime('%Y-%m-%d %H:%M')}")
+                    
+                    # Mostrar datos de licitación si están disponibles
+                    if 'licitacion' in orden:
+                        with st.expander("Datos de la Licitación"):
+                            lic = orden['licitacion']
+                            st.write(f"**Llamado:** {lic['numero_llamado']}/{lic['anio_llamado']}")
+                            st.write(f"**Nombre:** {lic['nombre_llamado']}")
+                            st.write(f"**Empresa:** {lic['empresa_adjudicada']}")
+                            st.write(f"**Contrato:** {lic['numero_contrato']}")
+                            if lic['fecha_contrato']:
+                                st.write(f"**Fecha Contrato:** {lic['fecha_contrato'].strftime('%Y-%m-%d')}")
+                            st.write(f"**Vigencia:** {lic['vigencia_contrato']}")
+                    
+                    # Mostrar items
+                    st.subheader("Items de la Orden")
+                    
+                    if orden['items']:
+                        # Crear DataFrame para visualización
+                        df_items = pd.DataFrame(orden['items'])
+                        
+                        # Formatear montos
+                        df_items['precio_unitario'] = df_items['precio_unitario'].apply(lambda x: f"₲ {x:,.0f}".replace(",", "."))
+                        df_items['monto_total'] = df_items['monto_total'].apply(lambda x: f"₲ {x:,.0f}".replace(",", "."))
+                        
+                        # Mostrar DataFrame
+                        st.dataframe(df_items)
+                        
+                        # Mostrar monto total
+                        st.subheader(f"Monto Total: ₲ {orden['monto_total']:,.0f}".replace(",", "."))
+                    else:
+                        st.info("Esta orden no tiene items.")
+                    
+                    # Opciones para la orden
+                    col1, col2, col3 = st.columns(3)
+                    
+                    with col1:
+                        if orden['estado'] == 'Emitida':
+                            if st.button("Marcar como Entregada"):
+                                success, message = cambiar_estado_orden_compra(orden_id, "Entregada")
+                                if success:
+                                    st.success(message)
+                                    time.sleep(1)
+                                    st.rerun()
+                                else:
+                                    st.error(message)
+                                    
+                    with col2:
+                        if orden['estado'] in ['Emitida', 'Entregada']:
+                            if st.button("Marcar como Anulada"):
+                                success, message = cambiar_estado_orden_compra(orden_id, "Anulada")
+                                if success:
+                                    st.success(message)
+                                    time.sleep(1)
+                                    st.rerun()
+                                else:
+                                    st.error(message)
+                    
+                    with col3:
+                        if st.button("Generar PDF"):
+                            # Placeholder para generación de PDF
+                            st.info("La generación de PDF será implementada en una versión futura.")
+        else:
+            st.info("No hay órdenes de compra para mostrar.")
+
+if __name__ == "__main__":
+    main()
