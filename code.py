@@ -1279,10 +1279,11 @@ def pagina_eliminar_esquemas():
 def pagina_gestionar_proveedores():
     """Página para gestionar proveedores"""
     st.header("Gestión de Proveedores")
-    
+    if 'last_page' not in st.session_state:
+        st.session_state.last_page = None
     # Pestañas para diferentes funciones
     if st.session_state.user_role == 'admin':
-        tab1, tab2, tab3, tab4 = st.tabs(["Lista de Proveedores", "Nuevo Proveedor", "Importar CSV", "Admin - Eliminar"])
+        tab1, tab2, tab3 = st.tabs(["Lista de Proveedores", "Nuevo Proveedor", "Importar CSV"])
     else:
         tab1, tab2, tab3 = st.tabs(["Lista de Proveedores", "Nuevo Proveedor", "Importar CSV"])
     
@@ -1401,39 +1402,28 @@ def pagina_gestionar_proveedores():
                                     eliminar = st.form_submit_button("🗑️ Eliminar Proveedor", type="secondary", help="Esta acción eliminará permanentemente el proveedor")
                                 
                                 # Procesar eliminación
+                                # Procesar eliminación
                                 if eliminar:
-                                    try:
-                                        with engine.connect() as conn:
-                                            # Verificar si está en uso en órdenes de compra
-                                            query_check_uso = text("""
-                                                SELECT COUNT(*) FROM reactivos_py.ordenes_compra oc
-                                                JOIN reactivos_py.items_orden_compra ioc ON oc.id = ioc.orden_compra_id
-                                                WHERE oc.esquema IN (
-                                                    SELECT esquema FROM reactivos_py.archivos_cargados 
-                                                    WHERE estado = 'Activo'
-                                                )
-                                            """)
-                                            
-                                            result_oc = conn.execute(query_check_uso)
-                                            ordenes_relacionadas = result_oc.scalar() or 0
-                                            
-                                            if ordenes_relacionadas > 0:
-                                                st.error(f"❌ No se puede eliminar el proveedor '{proveedor['razon_social']}' porque está relacionado con {ordenes_relacionadas} órdenes de compra.")
-                                                st.info("💡 Sugerencia: Puede marcarlo como 'inactivo' en lugar de eliminarlo.")
-                                            else:
-                                                # Si no está en uso, mostrar confirmación
-                                                st.warning("⚠️ **CONFIRMACIÓN REQUERIDA**")
-                                                confirmar_eliminacion = st.checkbox(
-                                                    f"Confirmo que deseo eliminar permanentemente a '{proveedor['razon_social']}' (RUC: {proveedor['ruc']})",
-                                                    key=f"confirm_delete_{proveedor['id']}"
-                                                )
-                                                
-                                                if confirmar_eliminacion:
-                                                    if st.button("✅ SÍ, ELIMINAR DEFINITIVAMENTE", type="primary"):
-                                                        try:
-                                                            # Proceder con la eliminación
+                                    st.warning("⚠️ **CONFIRMACIÓN REQUERIDA**")
+                                    confirmar_eliminacion = st.checkbox(
+                                        f"Confirmo que deseo eliminar permanentemente a '{proveedor['razon_social']}' (RUC: {proveedor['ruc']})",
+                                        key=f"confirm_delete_{proveedor['id']}"
+                                    )
+                                    
+                                    if confirmar_eliminacion:
+                                        # Usar un botón fuera del formulario para la confirmación final
+                                        col_confirm, _ = st.columns([1, 2])
+                                        with col_confirm:
+                                            if st.button("✅ SÍ, ELIMINAR DEFINITIVAMENTE", type="primary", key=f"confirm_button_{proveedor['id']}"):
+                                                try:
+                                                    with st.spinner("Eliminando proveedor... Por favor espere"):
+                                                        st.warning("⏳ OPERACIÓN EN PROGRESO - NO INTERRUMPA")
+                                                        
+                                                        with engine.connect() as conn:
+                                                            # Proceder con la eliminación sin verificar si está en uso
                                                             query_delete = text("DELETE FROM reactivos_py.proveedores WHERE id = :id")
                                                             conn.execute(query_delete, {'id': proveedor['id']})
+                                                            conn.commit()  # Hacer commit explícito
                                                             
                                                             # Registrar actividad de eliminación
                                                             registrar_actividad(
@@ -1448,19 +1438,23 @@ def pagina_gestionar_proveedores():
                                                                     'correo_electronico': proveedor['correo_electronico']
                                                                 }
                                                             )
-                                                            
-                                                            st.success(f"✅ Proveedor '{proveedor['razon_social']}' eliminado correctamente")
-                                                            st.balloons()
-                                                            time.sleep(2)
-                                                            st.rerun()
-                                                            
-                                                        except Exception as e:
-                                                            st.error(f"Error al eliminar proveedor: {e}")
-                                                else:
-                                                    st.info("👆 Active la confirmación y presione el botón rojo para proceder")
+                                                        
+                                                        st.success(f"✅ Proveedor '{proveedor['razon_social']}' eliminado correctamente")
+                                                        st.balloons()
+                                                        
+                                                        # Guardar el estado para mantener la página
+                                                        if 'last_page' not in st.session_state:
+                                                            st.session_state.last_page = None
+                                                        st.session_state.last_page = "gestionar_proveedores"
+                                                        
+                                                        # Detener la ejecución un momento para que el usuario vea el mensaje
+                                                        time.sleep(5)
+                                                        st.rerun()
                                                     
-                                    except Exception as e:
-                                        st.error(f"Error verificando uso del proveedor: {e}")
+                                                except Exception as e:
+                                                    st.error(f"Error al eliminar proveedor: {e}")
+                                    else:
+                                        st.info("👆 Active la confirmación y presione el botón rojo para proceder")
                                 
                                 # Procesar actualización
                                 if actualizar:
@@ -1504,8 +1498,11 @@ def pagina_gestionar_proveedores():
                                                 'id': proveedor['id']
                                             })
                                             
+                                            # Hacer commit explícito
+                                            conn.commit()
+                                            
                                             st.success(f"✅ Proveedor {nueva_razon} actualizado correctamente")
-                                            time.sleep(1)
+                                            time.sleep(5)  # Esperar más tiempo
                                             st.rerun()
                                     except Exception as e:
                                         st.error(f"Error al actualizar proveedor: {e}")
@@ -1516,21 +1513,26 @@ def pagina_gestionar_proveedores():
                                         nuevo_estado = not activo_actual
                                         estado_texto = "activo" if nuevo_estado else "inactivo"
                                         
-                                        with engine.connect() as conn:
-                                            query = text("""
-                                                UPDATE reactivos_py.proveedores
-                                                SET activo = :activo
-                                                WHERE id = :id
-                                            """)
-                                            
-                                            conn.execute(query, {
-                                                'activo': nuevo_estado,
-                                                'id': proveedor['id']
-                                            })
-                                            
-                                            st.success(f"✅ Proveedor {proveedor['razon_social']} marcado como {estado_texto}")
-                                            time.sleep(1)
-                                            st.rerun()
+                                        with st.spinner(f"Cambiando estado a {estado_texto}... Por favor espere"):
+                                            with engine.connect() as conn:
+                                                query = text("""
+                                                    UPDATE reactivos_py.proveedores
+                                                    SET activo = :activo
+                                                    WHERE id = :id
+                                                """)
+                                                
+                                                conn.execute(query, {
+                                                    'activo': nuevo_estado,
+                                                    'id': proveedor['id']
+                                                })
+                                                
+                                                # Hacer commit explícito
+                                                conn.commit()
+                                                
+                                                st.success(f"✅ Proveedor {proveedor['razon_social']} marcado como {estado_texto}")
+                                                # Esperar más tiempo para que la BD procese el cambio
+                                                time.sleep(5)
+                                                st.rerun()
                                     except Exception as e:
                                         st.error(f"Error al cambiar estado del proveedor: {e}")
                 else:
@@ -1589,8 +1591,11 @@ def pagina_gestionar_proveedores():
                                     'observaciones': observaciones
                                 })
                                 
+                                # Hacer commit explícito
+                                conn.commit()
+                                
                                 st.success(f"Proveedor '{razon_social}' registrado exitosamente")
-                                time.sleep(1)
+                                time.sleep(5)  # Esperar más tiempo
                                 st.rerun()
                     except Exception as e:
                         st.error(f"Error al registrar proveedor: {e}")
@@ -1837,11 +1842,6 @@ def pagina_gestionar_proveedores():
                                 
                         except Exception as e:
                             st.error(f"Error durante la importación: {e}")
-    
-    # Pestaña de administración (solo para admin)
-    if st.session_state.user_role == 'admin':
-        with tab4:
-            eliminar_proveedor_bulk()
 
 def eliminar_proveedor_bulk():
     """Función para eliminar múltiples proveedores (admin only)"""
@@ -1854,19 +1854,27 @@ def eliminar_proveedor_bulk():
     
     try:
         with engine.connect() as conn:
-            # Obtener proveedores inactivos sin uso
+            # Diagnóstico: mostrar el número de proveedores inactivos
+            diag_query = text("""
+                SELECT COUNT(*) 
+                FROM reactivos_py.proveedores 
+                WHERE activo = FALSE
+            """)
+            diag_result = conn.execute(diag_query)
+            count_inactivos = diag_result.scalar()
+            
+            if count_inactivos > 0:
+                st.info(f"Diagnóstico: Se encontraron {count_inactivos} proveedores inactivos en la base de datos")
+            else:
+                st.warning("⚠️ No hay proveedores inactivos en la base de datos.")
+                st.info("Para inactivar un proveedor, vaya a la pestaña 'Lista de Proveedores', seleccione un proveedor y haga clic en 'Cambiar Estado'.")
+                return
+            
+            # Obtener proveedores inactivos
             query = text("""
                 SELECT p.id, p.ruc, p.razon_social, p.fecha_registro
                 FROM reactivos_py.proveedores p
                 WHERE p.activo = FALSE
-                AND NOT EXISTS (
-                    SELECT 1 FROM reactivos_py.ordenes_compra oc
-                    JOIN reactivos_py.items_orden_compra ioc ON oc.id = ioc.orden_compra_id
-                    WHERE oc.esquema IN (
-                        SELECT esquema FROM reactivos_py.archivos_cargados 
-                        WHERE estado = 'Activo'
-                    )
-                )
                 ORDER BY p.fecha_registro DESC
             """)
             
@@ -1877,7 +1885,7 @@ def eliminar_proveedor_bulk():
             ]
             
             if proveedores_eliminables:
-                st.info(f"📊 Se encontraron {len(proveedores_eliminables)} proveedores inactivos sin uso que pueden eliminarse:")
+                st.success(f"📊 Se encontraron {len(proveedores_eliminables)} proveedores inactivos que pueden eliminarse:")
                 
                 # Mostrar lista
                 df_eliminables = pd.DataFrame(proveedores_eliminables)
@@ -1914,7 +1922,7 @@ def eliminar_proveedor_bulk():
                         except Exception as e:
                             st.error(f"Error en eliminación masiva: {e}")
             else:
-                st.info("✅ No hay proveedores inactivos sin uso para eliminar")
+                st.warning("⚠️ No se encontraron proveedores inactivos para eliminar.")
                 
     except Exception as e:
         st.error(f"Error obteniendo proveedores eliminables: {e}")
