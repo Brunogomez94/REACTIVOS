@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 import time
 import os
 import io
+import json
 import hashlib
 import openpyxl
 from sqlalchemy import create_engine, text
@@ -172,6 +173,139 @@ def configurar_tabla_proveedores():
         print(f"Error configurando tabla de proveedores: {e}")
         return False
 
+def configurar_tabla_auditoria():
+   """Crea la tabla de auditoría para registrar todas las actividades del sistema"""
+   try:
+       with engine.connect() as conn:
+           conn.execute(text("""
+               CREATE SCHEMA IF NOT EXISTS reactivos_py;
+           """))
+           
+           conn.execute(text("""
+               CREATE TABLE IF NOT EXISTS reactivos_py.auditoria (
+                   id SERIAL PRIMARY KEY,
+                   usuario_id INTEGER NOT NULL,
+                   usuario_nombre VARCHAR(100) NOT NULL,
+                   accion VARCHAR(100) NOT NULL,
+                   modulo VARCHAR(50) NOT NULL,
+                   descripcion TEXT NOT NULL,
+                   detalles JSONB,
+                   ip_address VARCHAR(45),
+                   user_agent TEXT,
+                   fecha_hora TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                   esquema_afectado VARCHAR(100),
+                   registro_afectado_id INTEGER,
+                   valores_anteriores JSONB,
+                   valores_nuevos JSONB,
+                   FOREIGN KEY (usuario_id) REFERENCES reactivos_py.usuarios(id)
+               );
+           """))
+           
+           conn.execute(text("""
+               CREATE INDEX IF NOT EXISTS idx_auditoria_usuario ON reactivos_py.auditoria(usuario_id);
+               CREATE INDEX IF NOT EXISTS idx_auditoria_fecha ON reactivos_py.auditoria(fecha_hora DESC);
+               CREATE INDEX IF NOT EXISTS idx_auditoria_modulo ON reactivos_py.auditoria(modulo);
+               CREATE INDEX IF NOT EXISTS idx_auditoria_accion ON reactivos_py.auditoria(accion);
+           """))
+           
+           return True
+   except Exception as e:
+       print(f"Error configurando tabla de auditoría: {e}")
+       return False
+
+def registrar_actividad(accion, modulo, descripcion, detalles=None, esquema_afectado=None, 
+                      registro_afectado_id=None, valores_anteriores=None, valores_nuevos=None):
+   """Registra una actividad en el sistema de auditoría"""
+   try:
+       if 'user_id' not in st.session_state or 'user_name' not in st.session_state:
+           return False
+           
+       with engine.connect() as conn:
+           query = text("""
+               INSERT INTO reactivos_py.auditoria 
+               (usuario_id, usuario_nombre, accion, modulo, descripcion, detalles, 
+                esquema_afectado, registro_afectado_id, valores_anteriores, valores_nuevos)
+               VALUES (:usuario_id, :usuario_nombre, :accion, :modulo, :descripcion, :detalles,
+                       :esquema_afectado, :registro_afectado_id, :valores_anteriores, :valores_nuevos)
+           """)
+           
+           conn.execute(query, {
+               'usuario_id': st.session_state.user_id,
+               'usuario_nombre': st.session_state.user_name,
+               'accion': accion,
+               'modulo': modulo,
+               'descripcion': descripcion,
+               'detalles': json.dumps(detalles) if detalles else None,
+               'esquema_afectado': esquema_afectado,
+               'registro_afectado_id': registro_afectado_id,
+               'valores_anteriores': json.dumps(valores_anteriores) if valores_anteriores else None,
+               'valores_nuevos': json.dumps(valores_nuevos) if valores_nuevos else None
+           })
+           
+           return True
+   except Exception as e:
+       print(f"Error registrando actividad en auditoría: {e}")
+       return False
+
+def obtener_historial_actividades(limite=100, usuario_id=None, modulo=None, accion=None, fecha_desde=None, fecha_hasta=None):
+    """Obtiene el historial de actividades con filtros opcionales"""
+    try:
+        with engine.connect() as conn:
+            query_base = """
+                SELECT a.id, a.usuario_nombre, a.accion, a.modulo, a.descripcion, 
+                       a.fecha_hora, a.esquema_afectado, a.detalles,
+                       a.valores_anteriores, a.valores_nuevos
+                FROM reactivos_py.auditoria a
+                WHERE 1=1
+            """
+            params = {}
+            
+            if usuario_id:
+                query_base += " AND a.usuario_id = :usuario_id"
+                params['usuario_id'] = usuario_id
+            
+            if modulo:
+                query_base += " AND a.modulo = :modulo"
+                params['modulo'] = modulo
+            
+            if accion:
+                query_base += " AND a.accion = :accion"
+                params['accion'] = accion
+            
+            if fecha_desde:
+                query_base += " AND a.fecha_hora >= :fecha_desde"
+                params['fecha_desde'] = fecha_desde
+            
+            if fecha_hasta:
+                query_base += " AND a.fecha_hora <= :fecha_hasta"
+                params['fecha_hasta'] = fecha_hasta
+            
+            query_base += " ORDER BY a.fecha_hora DESC LIMIT :limite"
+            params['limite'] = limite
+            
+            query = text(query_base)
+            result = conn.execute(query, params)
+            
+            actividades = []
+            for row in result:
+                actividades.append({
+                    'id': row[0],
+                    'usuario': row[1],
+                    'accion': row[2],
+                    'modulo': row[3],
+                    'descripcion': row[4],
+                    'fecha_hora': row[5],
+                    'esquema_afectado': row[6],
+                    'detalles': json.loads(row[7]) if row[7] else None,
+                    'valores_anteriores': json.loads(row[8]) if row[8] else None,
+                    'valores_nuevos': json.loads(row[9]) if row[9] else None
+                })
+            
+            return actividades
+    except Exception as e:
+        st.error(f"Error obteniendo historial de actividades: {e}")
+        return []
+
 def numero_a_letras(numero):
     """Convierte un número a su representación en letras (simplificada)"""
     millones = int(numero / 1000000)
@@ -193,7 +327,6 @@ def numero_a_letras(numero):
         texto += f"{unidades} "
     
     return texto.strip()
-
 
 def iniciar_actualizacion_automatica():
     """Configura la actualización automática de datos"""
@@ -379,6 +512,10 @@ def pagina_login():
                                 st.session_state.requiere_cambio_password = False
                             
                             st.success("Inicio de sesión exitoso!")
+                            registrar_actividad(
+                                accion="LOGIN",
+                                modulo="USUARIOS", 
+                                descripcion=f"Usuario {cedula} inició sesión exitosamente")
                             time.sleep(1)
                             st.rerun()
                         else:
@@ -387,7 +524,6 @@ def pagina_login():
                     st.error(f"Error al verificar credenciales: {e}")    
     with col2:
         st.image("https://via.placeholder.com/300x200?text=Logo+Sistema", width=300)
-
 
 def main():
     # (Código existente hasta la verificación de login)
@@ -412,6 +548,7 @@ def pagina_cargar_archivo():
         
         # Función para obtener proveedores
        # Función para obtener proveedores
+
 def obtener_proveedores():
     try:
         with engine.connect() as conn:
@@ -1078,201 +1215,319 @@ def pagina_gestionar_proveedores():
             st.write(f"**Tamaño:** {archivo_csv.size} bytes")
             
             # Botón para analizar archivo
+            # REEMPLAZAR LA SECCIÓN DE ANÁLISIS CSV EN pagina_gestionar_proveedores()
+
+            # En la función pagina_gestionar_proveedores(), tab3, reemplazar el botón "🔍 Analizar Archivo":
+
             if st.button("🔍 Analizar Archivo"):
                 try:
-                    # Intentar diferentes delimitadores y encodings
-                    delimitadores = [',', ';', '\t', '|']
-                    encodings = ['utf-8', 'latin-1', 'cp1252', 'iso-8859-1']
-                    
-                    df = None
-                    delimiter_usado = None
-                    encoding_usado = None
-                    
-                    # Mostrar información de debug
-                    st.write("**Intentando leer el archivo...**")
-                    
-                    # Probar diferentes combinaciones
-                    for encoding in encodings:
-                        for delimiter in delimitadores:
-                            try:
-                                # Resetear el archivo
-                                archivo_csv.seek(0)
-                                
-                                # Intentar leer con parámetros robustos
-                                df = pd.read_csv(
-                                    archivo_csv, 
-                                    delimiter=delimiter,
-                                    encoding=encoding,
-                                    quotechar='"',
-                                    skipinitialspace=True,
-                                    on_bad_lines='skip',
-                                    engine='python',
-                                    nrows=50
-                                )
-                                
-                                # Si llegamos aquí, funcionó
-                                delimiter_usado = delimiter
-                                encoding_usado = encoding
-                                st.success(f"✅ Archivo leído correctamente (Delimitador: '{delimiter_usado}', Encoding: {encoding_usado})")
-                                break
-                            except Exception:
-                                continue
+                    # Función mejorada para leer CSV completo
+                    def leer_csv_robusto(archivo):
+                        """Lee un archivo CSV de forma robusta con múltiples intentos"""
+                        delimitadores = [',', ';', '\t', '|']
+                        encodings = ['utf-8', 'latin-1', 'cp1252', 'iso-8859-1']
                         
-                        if df is not None:
-                            break
+                        mejor_df = None
+                        mejor_config = None
+                        max_filas = 0
+                        
+                        # Probar todas las combinaciones y quedarse con la que lee más filas
+                        for encoding in encodings:
+                            for delimiter in delimitadores:
+                                try:
+                                    archivo.seek(0)
+                                    
+                                    # Leer TODO el archivo (sin límite de filas)
+                                    df_temp = pd.read_csv(
+                                        archivo, 
+                                        delimiter=delimiter,
+                                        encoding=encoding,
+                                        quotechar='"',
+                                        skipinitialspace=True,
+                                        on_bad_lines='skip',
+                                        engine='python'
+                                    )
+                                    
+                                    # Verificar que el DataFrame tenga contenido válido
+                                    if len(df_temp) > max_filas and len(df_temp.columns) >= 2:
+                                        # Verificar que no todas las celdas estén vacías
+                                        celdas_no_vacias = df_temp.notna().sum().sum()
+                                        if celdas_no_vacias > 0:
+                                            mejor_df = df_temp.copy()
+                                            mejor_config = (delimiter, encoding)
+                                            max_filas = len(df_temp)
+                                    
+                                except Exception as e:
+                                    continue
+                        
+                        return mejor_df, mejor_config
+                    
+                    # Intentar leer el archivo completo
+                    st.write("**🔄 Analizando archivo completo...**")
+                    
+                    with st.spinner("Procesando archivo CSV..."):
+                        df, config = leer_csv_robusto(archivo_csv)
                     
                     if df is None:
                         st.error("❌ No se pudo leer el archivo con ningún formato estándar.")
                         return
                     
+                    delimiter_usado, encoding_usado = config
+                    st.success(f"✅ Archivo leído correctamente (Delimitador: '{delimiter_usado}', Encoding: {encoding_usado})")
+                    
                     # Limpiar DataFrame
-                    df = df.dropna(how='all')
-                    df = df.fillna('')
+                    df_original = df.copy()  # Guardar original para debugging
+                    df = df.dropna(how='all')  # Eliminar filas completamente vacías
+                    df = df.fillna('')  # Rellenar NaN con strings vacíos
                     
-                    # Mostrar información del DataFrame
-                    st.write(f"**Columnas encontradas:** {df.shape[1]}")
-                    st.write(f"**Filas encontradas:** {df.shape[0]}")
-                    st.write(f"**Nombres de columnas:** {list(df.columns)}")
+                    # Información detallada del archivo
+                    st.write("### 📊 Información del Archivo")
                     
-                    st.write("**Vista previa del archivo:**")
-                    st.dataframe(df.head(10))
+                    col1, col2, col3, col4 = st.columns(4)
+                    with col1:
+                        st.metric("📝 Filas Totales", len(df_original))
+                    with col2:
+                        st.metric("✅ Filas Válidas", len(df))
+                    with col3:
+                        st.metric("📋 Columnas", len(df.columns))
+                    with col4:
+                        # Contar celdas con datos
+                        celdas_con_datos = df.astype(str).ne('').sum().sum()
+                        st.metric("📊 Celdas con Datos", celdas_con_datos)
                     
-                    # Verificar si tiene al menos 2 columnas
-                    if len(df.columns) < 2:
-                        st.error(f"❌ El archivo tiene solo {len(df.columns)} columna(s). Se necesitan al menos 2 columnas (RUC y Razón Social)")
-                        return
+                    # Mostrar detalles del archivo
+                    st.write("**📄 Detalles del Archivo:**")
+                    st.write(f"• **Nombre:** {archivo_csv.name}")
+                    st.write(f"• **Tamaño:** {archivo_csv.size:,} bytes")
+                    st.write(f"• **Delimitador usado:** '{delimiter_usado}'")
+                    st.write(f"• **Encoding usado:** {encoding_usado}")
+                    st.write(f"• **Filas procesadas:** {len(df):,}")
+                    st.write(f"• **Columnas detectadas:** {len(df.columns)}")
                     
-                    # Si llegamos aquí, el archivo es válido para procesamiento
-                    st.success("✅ Archivo válido para importación")
+                    # Análisis de calidad de datos
+                    st.write("### 🔍 Análisis de Calidad de Datos")
                     
-                    # Guardar DataFrame en session_state
+                    # Estadísticas por columna
+                    estadisticas = []
+                    for col in df.columns:
+                        no_vacias = df[col].astype(str).ne('').sum()
+                        unicas = df[col].nunique()
+                        estadisticas.append({
+                            'Columna': col,
+                            'Valores No Vacíos': no_vacias,
+                            'Valores Únicos': unicas,
+                            'Porcentaje Completitud': f"{(no_vacias/len(df)*100):.1f}%"
+                        })
+                    
+                    df_stats = pd.DataFrame(estadisticas)
+                    st.dataframe(df_stats, use_container_width=True)
+                    
+                    # Verificar si tiene estructura típica de proveedores
+                    posible_ruc = False
+                    posible_razon = False
+                    
+                    for col in df.columns:
+                        col_lower = str(col).lower()
+                        # Buscar columnas que podrían ser RUC
+                        if any(palabra in col_lower for palabra in ['ruc', 'rut', 'cuit', 'nit', 'cedula', 'documento']):
+                            posible_ruc = True
+                        # Buscar columnas que podrían ser razón social
+                        if any(palabra in col_lower for palabra in ['razon', 'nombre', 'empresa', 'social', 'denominacion']):
+                            posible_razon = True
+                    
+                    if posible_ruc and posible_razon:
+                        st.success("✅ El archivo parece tener estructura de proveedores (RUC y Razón Social detectados)")
+                    elif len(df.columns) >= 2:
+                        st.warning("⚠️ Estructura no reconocida automáticamente, pero tiene al menos 2 columnas")
+                    else:
+                        st.error("❌ El archivo no tiene estructura suficiente para importar proveedores")
+                    
+                    # Mostrar vista previa de datos
+                    st.write("### 👀 Vista Previa de Datos")
+                    
+                    # Selector para ver diferentes partes del archivo
+                    vista_opcion = st.selectbox(
+                        "Seleccionar vista:",
+                        ["Primeras 20 filas", "Filas del medio", "Últimas 20 filas", "Muestra aleatoria"]
+                    )
+                    
+                    if vista_opcion == "Primeras 20 filas":
+                        st.dataframe(df.head(20))
+                    elif vista_opcion == "Filas del medio":
+                        medio = len(df) // 2
+                        st.dataframe(df.iloc[medio-10:medio+10])
+                    elif vista_opcion == "Últimas 20 filas":
+                        st.dataframe(df.tail(20))
+                    else:  # Muestra aleatoria
+                        if len(df) > 20:
+                            muestra = df.sample(min(20, len(df)))
+                            st.dataframe(muestra)
+                        else:
+                            st.dataframe(df)
+                    
+                    # Detectar posibles problemas
+                    st.write("### ⚠️ Detección de Problemas")
+                    
+                    problemas = []
+                    
+                    # Verificar filas completamente vacías
+                    filas_vacias = len(df_original) - len(df)
+                    if filas_vacias > 0:
+                        problemas.append(f"Se encontraron {filas_vacias} filas completamente vacías (fueron eliminadas)")
+                    
+                    # Verificar columnas con muchos valores vacíos
+                    for col in df.columns:
+                        vacios = df[col].astype(str).eq('').sum()
+                        if vacios > len(df) * 0.5:  # Más del 50% vacío
+                            problemas.append(f"Columna '{col}' tiene {vacios} valores vacíos ({(vacios/len(df)*100):.1f}%)")
+                    
+                    # Verificar duplicados en primera columna (posible RUC)
+                    if len(df.columns) > 0:
+                        primera_col = df.columns[0]
+                        duplicados = df[primera_col].duplicated().sum()
+                        if duplicados > 0:
+                            problemas.append(f"Se encontraron {duplicados} valores duplicados en '{primera_col}'")
+                    
+                    if problemas:
+                        for problema in problemas:
+                            st.warning(f"⚠️ {problema}")
+                    else:
+                        st.success("✅ No se detectaron problemas obvios en los datos")
+                    
+                    # Guardar DataFrame procesado en session_state
                     st.session_state.df_importar = df
                     st.session_state.delimiter_usado = delimiter_usado
                     st.session_state.encoding_usado = encoding_usado
+                    st.session_state.filas_originales = len(df_original)
+                    st.session_state.celdas_con_datos = celdas_con_datos
+                    
+                    st.success(f"✅ Archivo analizado completamente: {len(df):,} filas listas para mapeo")
                     
                 except Exception as e:
                     st.error(f"❌ Error al procesar el archivo: {e}")
-            
-            # Mostrar sección de mapeo solo si el DataFrame está disponible
+                    st.write("**Detalles del error para debugging:**")
+                    st.code(str(e))
+
+            # TAMBIÉN AGREGAR ESTA MEJORA AL PROCESO DE IMPORTACIÓN
+            # Reemplazar la parte donde se procesa el DataFrame en la importación:
+
+            # En el botón "🚀 Importar Proveedores", después de obtener el DataFrame:
             if 'df_importar' in st.session_state:
                 df = st.session_state.df_importar
                 
                 st.divider()
-                st.subheader("Mapeo de Columnas")
+                st.subheader("🗂️ Mapeo de Columnas")
                 
-                # Mapear columnas
+                st.info(f"📊 **Datos a procesar:** {len(df):,} filas con {st.session_state.celdas_con_datos:,} celdas con datos")
+                
+                # Mapear columnas con autodetección mejorada
                 col1, col2 = st.columns(2)
                 
+                # Autodetección inteligente de columnas
+                def detectar_columna_ruc(columnas):
+                    for i, col in enumerate(columnas):
+                        col_lower = str(col).lower()
+                        if any(palabra in col_lower for palabra in ['ruc', 'rut', 'cuit', 'nit', 'documento', 'identificacion']):
+                            return i
+                    return 0  # Por defecto la primera
+                
+                def detectar_columna_razon(columnas):
+                    for i, col in enumerate(columnas):
+                        col_lower = str(col).lower()
+                        if any(palabra in col_lower for palabra in ['razon', 'nombre', 'empresa', 'social', 'denominacion']):
+                            return i
+                    return 1 if len(columnas) > 1 else 0  # Por defecto la segunda
+                
+                def detectar_columna_direccion(columnas):
+                    for i, col in enumerate(columnas):
+                        col_lower = str(col).lower()
+                        if any(palabra in col_lower for palabra in ['direccion', 'domicilio', 'ubicacion', 'address']):
+                            return i
+                    return None
+                
+                def detectar_columna_correo(columnas):
+                    for i, col in enumerate(columnas):
+                        col_lower = str(col).lower()
+                        if any(palabra in col_lower for palabra in ['correo', 'email', 'mail', 'electronico']):
+                            return i
+                    return None
+                
+                ruc_idx = detectar_columna_ruc(df.columns.tolist())
+                razon_idx = detectar_columna_razon(df.columns.tolist())
+                direccion_idx = detectar_columna_direccion(df.columns.tolist())
+                correo_idx = detectar_columna_correo(df.columns.tolist())
+                
                 with col1:
-                    col_ruc = st.selectbox("Columna RUC:", options=df.columns.tolist(), index=0)
-                    col_razon = st.selectbox("Columna Razón Social:", options=df.columns.tolist(), index=1 if len(df.columns) > 1 else 0)
+                    col_ruc = st.selectbox("Columna RUC:", options=df.columns.tolist(), index=ruc_idx)
+                    col_razon = st.selectbox("Columna Razón Social:", options=df.columns.tolist(), index=razon_idx)
                 
                 with col2:
-                    col_direccion = st.selectbox("Columna Dirección (opcional):", options=["No mapear"] + df.columns.tolist())
-                    col_correo = st.selectbox("Columna Correo (opcional):", options=["No mapear"] + df.columns.tolist())
+                    opciones_direccion = ["No mapear"] + df.columns.tolist()
+                    col_direccion = st.selectbox(
+                        "Columna Dirección (opcional):", 
+                        options=opciones_direccion, 
+                        index=(direccion_idx + 1) if direccion_idx is not None else 0
+                    )
+                    
+                    opciones_correo = ["No mapear"] + df.columns.tolist()
+                    col_correo = st.selectbox(
+                        "Columna Correo (opcional):", 
+                        options=opciones_correo,
+                        index=(correo_idx + 1) if correo_idx is not None else 0
+                    )
                 
-                # Vista previa de mapeo
-                st.write("**Vista previa del mapeo:**")
+                # Vista previa del mapeo con más filas
+                st.write("**🔍 Vista previa del mapeo (primeras 10 filas):**")
                 preview_data = []
-                for i in range(min(3, len(df))):
+                for i in range(min(10, len(df))):
                     preview_data.append({
-                        'RUC': df.iloc[i][col_ruc],
-                        'Razón Social': df.iloc[i][col_razon],
-                        'Dirección': df.iloc[i][col_direccion] if col_direccion != "No mapear" else "No mapeado",
-                        'Correo': df.iloc[i][col_correo] if col_correo != "No mapear" else "No mapeado"
+                        'Fila': i + 1,
+                        'RUC': str(df.iloc[i][col_ruc])[:50],  # Limitar caracteres mostrados
+                        'Razón Social': str(df.iloc[i][col_razon])[:50],
+                        'Dirección': str(df.iloc[i][col_direccion])[:50] if col_direccion != "No mapear" else "No mapeado",
+                        'Correo': str(df.iloc[i][col_correo])[:50] if col_correo != "No mapear" else "No mapeado"
                     })
                 
                 st.dataframe(pd.DataFrame(preview_data))
                 
-                # Botón de importación
-                st.divider()
-                if st.button("🚀 Importar Proveedores", type="primary"):
-                    try:
-                        insertados = 0
-                        errores = 0
-                        
-                        for index, row in df.iterrows():
-                            try:
-                                # Solo procesar las primeras 3 filas para debug
-                                if index >= 3:
-                                    break
-                                
-                                ruc = str(row[col_ruc]).strip()
-                                razon_social = str(row[col_razon]).strip()
-                                direccion = str(row[col_direccion]).strip() if col_direccion != "No mapear" and pd.notna(row[col_direccion]) else None
-                                correo = str(row[col_correo]).strip() if col_correo != "No mapear" and pd.notna(row[col_correo]) else None
-                                
-                                # Validar datos mínimos
-                                if not ruc or not razon_social or ruc.lower() == "nan" or razon_social.lower() == "nan":
-                                    st.error(f"Fila {index + 1}: RUC o Razón Social vacíos")
-                                    errores += 1
-                                    continue
-                                
-                                # Insertar en base de datos con commit explícito
-                                with engine.connect() as conn:
-                                    trans = conn.begin()
-                                    try:
-                                        query = text("""
-                                            INSERT INTO reactivos_py.proveedores (ruc, razon_social, direccion, correo_electronico)
-                                            VALUES (:ruc, :razon_social, :direccion, :correo)
-                                        """)
-                                        
-                                        conn.execute(query, {
-                                            'ruc': ruc,
-                                            'razon_social': razon_social,
-                                            'direccion': direccion,
-                                            'correo': correo
-                                        })
-                                        
-                                        trans.commit()
-                                        st.success(f"Fila {index + 1}: Insertado correctamente - {ruc} | {razon_social}")
-                                        insertados += 1
-                                        
-                                    except Exception as e:
-                                        trans.rollback()
-                                        st.error(f"Fila {index + 1}: Error - {str(e)}")
-                                        errores += 1
-                            
-                            except Exception as e:
-                                st.error(f"Fila {index + 1}: Error general - {str(e)}")
-                                errores += 1
-                        
-                        # Verificar inmediatamente después de la inserción
-                        st.write("**Verificación inmediata:**")
-                        try:
-                            with engine.connect() as conn:
-                                query = text("SELECT COUNT(*) FROM reactivos_py.proveedores")
-                                result = conn.execute(query)
-                                count = result.scalar()
-                                st.write(f"Total de registros en la tabla: {count}")
-                                
-                                # Mostrar los últimos registros insertados
-                                query = text("""
-                                    SELECT ruc, razon_social, fecha_registro 
-                                    FROM reactivos_py.proveedores 
-                                    ORDER BY fecha_registro DESC 
-                                    LIMIT 5
-                                """)
-                                result = conn.execute(query)
-                                
-                                st.write("**Últimos registros:**")
-                                for row in result:
-                                    st.write(f"- {row[0]} | {row[1]} | {row[2]}")
-                                    
-                        except Exception as e:
-                            st.error(f"Error verificando datos: {e}")
-                        
-                        # Mostrar resultados
-                        st.success(f"✅ Importación completada: {insertados} registros insertados, {errores} errores")
-                        
-                        # Limpiar session state
-                        if 'df_importar' in st.session_state:
-                            del st.session_state.df_importar
-                            del st.session_state.delimiter_usado
-                            del st.session_state.encoding_usado
-                        
-                    except Exception as e:
-                        st.error(f"Error durante la importación: {e}")
+                # Análisis de datos antes de importar
+                st.write("**📊 Análisis Pre-Importación:**")
+                
+                col1, col2, col3 = st.columns(3)
+                
+                with col1:
+                    # Contar registros con RUC válido
+                    rucs_validos = df[col_ruc].astype(str).str.strip().ne('').sum()
+                    st.metric("RUCs Válidos", f"{rucs_validos:,}")
+                
+                with col2:
+                    # Contar registros con razón social válida
+                    razones_validas = df[col_razon].astype(str).str.strip().ne('').sum()
+                    st.metric("Razones Sociales Válidas", f"{razones_validas:,}")
+                
+                with col3:
+                    # Estimar registros a procesar
+                    registros_procesables = df[(df[col_ruc].astype(str).str.strip().ne('')) & 
+                                             (df[col_razon].astype(str).str.strip().ne(''))].shape[0]
+                    st.metric("Registros Procesables", f"{registros_procesables:,}")
+                
+                # Mostrar estadísticas de duplicados
+                if registros_procesables > 0:
+                    duplicados_ruc = df[col_ruc].astype(str).str.strip().duplicated().sum()
+                    if duplicados_ruc > 0:
+                        st.warning(f"⚠️ Se detectaron {duplicados_ruc} RUCs duplicados en el archivo")
+                
+                # Checkbox para confirmar importación
+                confirmar_importacion = st.checkbox(
+                    f"Confirmo la importación de {registros_procesables:,} registros procesables",
+                    help="Esta acción insertará todos los registros válidos en la base de datos"
+                )
+                if insertados > 0:
+                    registrar_actividad(
+                        accion="IMPORT",
+                        modulo="PROVEEDORES",
+                        descripcion=f"Importación CSV: {insertados} insertados, {duplicados} duplicados"
+                    )
 
 def pagina_administrar_usuarios():
     """Página para administrar usuarios"""
@@ -1483,6 +1738,138 @@ def pagina_administrar_usuarios():
                     except Exception as e:
                         st.error(f"Error al crear usuario: {e}")
 
+def pagina_historial_actividades():
+    """Página para mostrar el historial de actividades del sistema"""
+    st.header("📋 Historial de Actividades del Sistema")
+    
+    # Filtros
+    with st.expander("🔍 Filtros de Búsqueda", expanded=True):
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            try:
+                with engine.connect() as conn:
+                    query = text("SELECT id, username, nombre_completo FROM reactivos_py.usuarios ORDER BY username")
+                    result = conn.execute(query)
+                    usuarios = [{'id': row[0], 'username': row[1], 'nombre': row[2]} for row in result]
+                    
+                usuario_filtro = st.selectbox(
+                    "Filtrar por Usuario:",
+                    options=[None] + [u['id'] for u in usuarios],
+                    format_func=lambda x: "Todos los usuarios" if x is None else f"{next(u['username'] for u in usuarios if u['id'] == x)} ({next(u['nombre'] for u in usuarios if u['id'] == x)})"
+                )
+            except:
+                usuario_filtro = None
+        
+        with col2:
+            modulos = ["PROVEEDORES", "ORDENES_COMPRA", "USUARIOS", "LICITACIONES", "ARCHIVOS", "LOGIN"]
+            modulo_filtro = st.selectbox(
+                "Filtrar por Módulo:",
+                options=[None] + modulos,
+                format_func=lambda x: "Todos los módulos" if x is None else x
+            )
+        
+        with col3:
+            acciones = ["CREATE", "UPDATE", "DELETE", "LOGIN", "LOGOUT", "IMPORT", "EXPORT"]
+            accion_filtro = st.selectbox(
+                "Filtrar por Acción:",
+                options=[None] + acciones,
+                format_func=lambda x: "Todas las acciones" if x is None else x
+            )
+        
+        col4, col5, col6 = st.columns(3)
+        with col4:
+            fecha_desde = st.date_input("Fecha desde:", value=None)
+        with col5:
+            fecha_hasta = st.date_input("Fecha hasta:", value=None)
+        with col6:
+            limite = st.number_input("Máximo registros:", min_value=10, max_value=1000, value=100, step=10)
+    
+    if st.button("🔍 Aplicar Filtros"):
+        st.rerun()
+    
+    actividades = obtener_historial_actividades(
+        limite=limite,
+        usuario_id=usuario_filtro,
+        modulo=modulo_filtro,
+        accion=accion_filtro,
+        fecha_desde=fecha_desde,
+        fecha_hasta=fecha_hasta
+    )
+    
+    if actividades:
+        st.subheader(f"📊 Mostrando {len(actividades)} actividades")
+        
+        df_actividades = pd.DataFrame(actividades)
+        df_actividades['fecha_hora'] = pd.to_datetime(df_actividades['fecha_hora']).dt.strftime('%Y-%m-%d %H:%M:%S')
+        
+        df_display = df_actividades[['fecha_hora', 'usuario', 'modulo', 'accion', 'descripcion', 'esquema_afectado']].copy()
+        df_display.columns = ['Fecha/Hora', 'Usuario', 'Módulo', 'Acción', 'Descripción', 'Esquema']
+        
+        def colorear_accion(val):
+            if val == 'CREATE':
+                return 'background-color: #d4edda; color: #155724'
+            elif val == 'UPDATE':
+                return 'background-color: #fff3cd; color: #856404'
+            elif val == 'DELETE':
+                return 'background-color: #f8d7da; color: #721c24'
+            elif val == 'LOGIN':
+                return 'background-color: #d1ecf1; color: #0c5460'
+            else:
+                return ''
+        
+        df_styled = df_display.style.applymap(colorear_accion, subset=['Acción'])
+        st.dataframe(df_styled, use_container_width=True)
+        
+        st.subheader("🔍 Detalles de Actividad")
+        actividad_seleccionada = st.selectbox(
+            "Seleccionar actividad para ver detalles:",
+            options=range(len(actividades)),
+            format_func=lambda x: f"{actividades[x]['fecha_hora'].strftime('%Y-%m-%d %H:%M')} - {actividades[x]['usuario']} - {actividades[x]['descripcion']}"
+        )
+        
+        if actividad_seleccionada is not None:
+            actividad = actividades[actividad_seleccionada]
+            
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.write("**Información General:**")
+                st.write(f"• **Usuario:** {actividad['usuario']}")
+                st.write(f"• **Fecha/Hora:** {actividad['fecha_hora'].strftime('%Y-%m-%d %H:%M:%S')}")
+                st.write(f"• **Módulo:** {actividad['modulo']}")
+                st.write(f"• **Acción:** {actividad['accion']}")
+                st.write(f"• **Descripción:** {actividad['descripcion']}")
+                if actividad['esquema_afectado']:
+                    st.write(f"• **Esquema Afectado:** {actividad['esquema_afectado']}")
+            
+            with col2:
+                if actividad['detalles']:
+                    st.write("**Detalles Adicionales:**")
+                    st.json(actividad['detalles'])
+                
+                if actividad['valores_anteriores'] or actividad['valores_nuevos']:
+                    st.write("**Cambios Realizados:**")
+                    
+                    if actividad['valores_anteriores']:
+                        st.write("*Valores Anteriores:*")
+                        st.json(actividad['valores_anteriores'])
+                    
+                    if actividad['valores_nuevos']:
+                        st.write("*Valores Nuevos:*")
+                        st.json(actividad['valores_nuevos'])
+        
+        st.subheader("📤 Exportar Historial")
+        if st.button("Descargar Historial como CSV"):
+            csv = df_display.to_csv(index=False)
+            st.download_button(
+                label="📥 Descargar CSV",
+                data=csv.encode('utf-8'),
+                file_name=f"historial_actividades_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                mime="text/csv"
+            )
+    else:
+        st.info("No se encontraron actividades con los filtros aplicados.")
 
 def pagina_cambiar_password():
     """Página para cambiar contraseña del usuario actual"""
@@ -1855,7 +2242,12 @@ def crear_orden_compra(esquema, numero_orden, fecha_emision, servicio_beneficiar
                 
                 # Confirmar transacción
                 trans.commit()
-                
+                registrar_actividad(
+                    accion="CREATE",
+                    modulo="ORDENES_COMPRA",
+                    descripcion=f"Orden de compra {numero_orden} creada",
+                    esquema_afectado=esquema
+                )
                 return True, "Orden de compra creada exitosamente", orden_id
                 
             except Exception as e:
@@ -2390,7 +2782,6 @@ def pagina_ordenes_compra():
         else:
             st.info("Seleccione una licitación para emitir una orden de compra.")
 
-
 def pagina_dashboard():
     """Página de resumen/dashboard"""
     st.header("Dashboard")
@@ -2497,6 +2888,7 @@ def main():
     configurar_tabla_ordenes_compra()
     configurar_tabla_cargas()
     configurar_tabla_proveedores()
+    configurar_tabla_auditoria()
     
     # Inicializar el estado de sesión si es necesario
     if 'logged_in' not in st.session_state:
@@ -2532,29 +2924,29 @@ def main():
     # Título principal
     st.title("Sistema de Gestión de Llamados Reactivos")
     
-    # Opciones de menú según el rol
+    # Opciones de menú según el rol (SIN historial_actividades por ahora)
     if st.session_state.user_role == 'admin':
         menu_options = {
-        "dashboard": "📈 Dashboard",
-        "cargar_archivo": "📥 Cargar Archivo", 
-        "ver_cargas": "📋 Ver Cargas",
-        "ordenes_compra": "📝 Órdenes de Compra",
-        "gestionar_proveedores": "🏭 Gestión de Proveedores",  # ← AGREGAR ESTA LÍNEA
-        "eliminar_esquemas": "🗑️ Eliminar Esquemas",
-        "admin_usuarios": "👥 Administrar Usuarios",
-        "cambiar_password": "🔑 Cambiar Contraseña",
-        "logout": "🚪 Cerrar Sesión"
-    }
+            "dashboard": "📈 Dashboard",
+            "cargar_archivo": "📥 Cargar Archivo", 
+            "ver_cargas": "📋 Ver Cargas",
+            "ordenes_compra": "📝 Órdenes de Compra",
+            "gestionar_proveedores": "🏭 Gestión de Proveedores",
+            "eliminar_esquemas": "🗑️ Eliminar Esquemas",
+            "admin_usuarios": "👥 Administrar Usuarios",
+            "cambiar_password": "🔑 Cambiar Contraseña",
+            "logout": "🚪 Cerrar Sesión"
+        }
     else:
         menu_options = {
-        "dashboard": "📈 Dashboard",
-        "cargar_archivo": "📥 Cargar Archivo", 
-        "ver_cargas": "📋 Ver Cargas",
-        "ordenes_compra": "📝 Órdenes de Compra",
-        "gestionar_proveedores": "🏭 Gestión de Proveedores",  # ← AGREGAR ESTA LÍNEA TAMBIÉN
-        "cambiar_password": "🔑 Cambiar Contraseña",
-        "logout": "🚪 Cerrar Sesión"
-    }
+            "dashboard": "📈 Dashboard",
+            "cargar_archivo": "📥 Cargar Archivo", 
+            "ver_cargas": "📋 Ver Cargas",
+            "ordenes_compra": "📝 Órdenes de Compra",
+            "gestionar_proveedores": "🏭 Gestión de Proveedores",
+            "cambiar_password": "🔑 Cambiar Contraseña",
+            "logout": "🚪 Cerrar Sesión"
+        }
     
     # Crear menú de navegación
     menu = st.sidebar.radio(
@@ -2563,7 +2955,8 @@ def main():
         format_func=lambda x: menu_options[x]
     )
     
-    # Mostrar la página seleccionada
+    # Mostrar la página seleccionada (SIN elif historial_actividades)
+
     if menu == "dashboard":
         pagina_dashboard()
     elif menu == "cargar_archivo":
@@ -2572,17 +2965,18 @@ def main():
         pagina_ver_cargas()
     elif menu == "ordenes_compra":
         pagina_ordenes_compra()
-    elif menu == "gestionar_proveedores":  # ← AGREGAR ESTA SECCIÓN
+    elif menu == "gestionar_proveedores":
         pagina_gestionar_proveedores()
     elif menu == "eliminar_esquemas" and st.session_state.user_role == 'admin':
         pagina_eliminar_esquemas()
     elif menu == "admin_usuarios" and st.session_state.user_role == 'admin':
         pagina_administrar_usuarios()
+    elif menu == "historial_actividades":
+            pagina_historial_actividades()
     elif menu == "cambiar_password":
         pagina_cambiar_password()
     elif menu == "logout":
-    
-    # Cerrar sesión
+        # Cerrar sesión
         st.session_state.logged_in = False
         st.session_state.user_id = None
         st.session_state.user_role = None
@@ -2590,9 +2984,6 @@ def main():
         st.success("Sesión cerrada correctamente. Redirigiendo...")
         time.sleep(1)
         st.rerun()
-
-if __name__ == "__main__":
-    main()
 
 def obtener_ordenes_compra(esquema=None):
     """Obtiene las órdenes de compra existentes, filtradas por esquema si se especifica"""
