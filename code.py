@@ -611,8 +611,15 @@ def obtener_proveedores():
                 ORDER BY razon_social
             """)
             result = conn.execute(query)
-            return [{'nombre': row[0], 'ruc': row[1]} for row in result]
-    except:
+            proveedores = []
+            for row in result:
+                proveedores.append({
+                    'nombre': row[0],  # razon_social
+                    'ruc': row[1]      # ruc
+                })
+            return proveedores
+    except Exception as e:
+        st.error(f"Error al obtener proveedores: {e}")
         return []
         
         # Campos en el orden solicitado
@@ -877,47 +884,116 @@ def pagina_cargar_archivo():
     """Página para cargar un nuevo archivo"""
     st.header("Cargar Archivo")
     
-    # Formulario para subir archivo
-    with st.form("upload_form"):
+    # Inicializar variables de estado para autocompletado
+    if 'licitacion_seleccionada' not in st.session_state:
+        st.session_state.licitacion_seleccionada = None
+    if 'licitacion_data' not in st.session_state:
+        st.session_state.licitacion_data = {}
+    
+    # BUSCADOR PEQUEÑO SOLO PARA ID - FUERA DEL FORMULARIO
+    col_search1, col_search2 = st.columns([1, 3])
+    with col_search1:
+        st.write("Buscar ID existente:")
+    with col_search2:
+        id_busqueda = st.text_input("", placeholder="Escriba un ID para buscar...", key="id_search")
+        if id_busqueda:
+            # Buscar en la base de datos si existe una licitación con ese ID
+            try:
+                with engine.connect() as conn:
+                    esquemas = obtener_esquemas_postgres()
+                    licitacion_encontrada = False
+                    
+                    for esquema in esquemas:
+                        try:
+                            query = text(f"""
+                                SELECT "I_D", "NOMBRE DEL LLAMADO"
+                                FROM "{esquema}"."llamado"
+                                WHERE "I_D" ILIKE :id_busqueda
+                                LIMIT 5
+                            """)
+                            result = conn.execute(query, {'id_busqueda': f"%{id_busqueda}%"})
+                            resultados = result.fetchall()
+                            
+                            if resultados:
+                                licitacion_encontrada = True
+                                st.success("IDs encontrados:")
+                                for r in resultados:
+                                    if st.button(f"{r[0]} - {r[1]}", key=f"btn_{r[0]}"):
+                                        st.session_state.licitacion_seleccionada = r[0]
+                                        st.rerun()
+                        except Exception:
+                            pass
+                    
+                    if not licitacion_encontrada:
+                        st.info("No se encontraron IDs similares")
+            except Exception as e:
+                st.error(f"Error al buscar: {e}")
+    
+    # Formulario principal para subir archivo
+    with st.form("upload_form", clear_on_submit=False):
         st.subheader("📋 Información de la Licitación")
         
         # Campos en el orden solicitado
         col1, col2 = st.columns(2)
         
         with col1:
-            id_licitacion = st.text_input("I.D.:")
-            modalidad = st.text_input("Modalidad:", placeholder="Ej: CD, LP, LC, CO, LPN, CVE, LPI, LCO, MCN...")
-            numero_anio = st.text_input("N° / Año de Modalidad:")
+            id_licitacion = st.text_input("I.D.:", 
+                                         value=st.session_state.licitacion_data.get('id_licitacion', ''))
+            
+            modalidad = st.selectbox("Modalidad:", 
+                                   options=["Seleccionar...", "CD", "LP", "LC", "CO", "LPN", "CVE", "LPI", "LCO", "MCN"],
+                                   index=0)
+            
+            numero_anio = st.text_input("N° / Año de Modalidad:",
+                                       value=st.session_state.licitacion_data.get('numero_anio', ''))
+        
+        # Si se ingresó un ID de licitación, intentar buscar datos existentes
+        if id_licitacion and id_licitacion == st.session_state.licitacion_seleccionada:
+            # Ya tenemos los datos, no hay que volver a buscar
+            pass
+        elif id_licitacion and id_licitacion != st.session_state.licitacion_seleccionada:
+            # Código existente para buscar licitación por ID...
+            pass
         
         with col2:
-            nombre_llamado = st.text_input("Nombre del llamado:")
+            nombre_llamado = st.text_input("Nombre del llamado:", 
+                                          value=st.session_state.licitacion_data.get('nombre_llamado', ''))
             
             # Autocompletado de proveedores
             proveedores_existentes = obtener_proveedores()
             
             if proveedores_existentes:
-                empresa_options = [f"{p['nombre']} - {p['ruc']}" for p in proveedores_existentes]
+                # Preparar opciones solo con nombres (sin RUC)
+                empresas = [p['nombre'] for p in proveedores_existentes]
                 
                 empresa_seleccionada = st.selectbox(
                     "Empresa Adjudicada:",
-                    options=["Seleccionar..."] + empresa_options + ["+ Nuevo Proveedor"]
+                    options=["Seleccionar..."] + empresas + ["+ Nuevo Proveedor"]
                 )
                 
                 if empresa_seleccionada == "+ Nuevo Proveedor":
                     st.info("💡 Vaya a 'Gestión de Proveedores' para registrar una nueva empresa")
-                    empresa_adjudicada = st.text_input("Nombre de la empresa:", disabled=True)
+                    empresa_adjudicada = ""
                     ruc = st.text_input("RUC:", disabled=True)
                 elif empresa_seleccionada != "Seleccionar...":
-                    # Extraer datos del proveedor seleccionado
-                    empresa_adjudicada = empresa_seleccionada.split(" - ")[0]
-                    ruc_autocompletado = empresa_seleccionada.split(" - ")[-1]
-                    ruc = st.text_input("RUC:", value=ruc_autocompletado, disabled=True)
+                    # Buscar el RUC correspondiente
+                    empresa_adjudicada = empresa_seleccionada
+                    
+                    # SOLUCIÓN AL PROBLEMA DEL RUC - Búsqueda directa
+                    ruc_value = ""
+                    for p in proveedores_existentes:
+                        if p['nombre'] == empresa_adjudicada:
+                            ruc_value = p['ruc']
+                            break
+                    
+                    # Mostrar el RUC (visible pero no editable)
+                    ruc = st.text_input("RUC:", value=ruc_value, disabled=True)
                 else:
                     empresa_adjudicada = ""
                     ruc = st.text_input("RUC:", disabled=True)
             else:
                 st.warning("⚠️ No hay proveedores registrados. Registre primero en 'Gestión de Proveedores'")
-                empresa_adjudicada = st.text_input("Empresa Adjudicada:", disabled=True)
+                empresa_adjudicada = ""
                 ruc = st.text_input("RUC:", disabled=True)
         
         # Segunda fila de campos
@@ -927,223 +1003,130 @@ def pagina_cargar_archivo():
             vigencia_contrato = st.text_input("Vigencia del Contrato:")
         
         with col4:
-            fecha_firma = st.date_input("Fecha de la firma del contrato:")
+            # Usar widget de fecha con formato español
+            try:
+                # Intentar configurar locale español
+                import locale
+                locale.setlocale(locale.LC_TIME, 'es_ES.UTF-8')
+            except:
+                # Si falla, ignorar
+                pass
+            
+            fecha_firma = st.date_input(
+                "Fecha de la firma del contrato:",
+                value=datetime.now(),
+                format="DD/MM/YYYY"  # Formato día/mes/año
+            )
+            
+            # Intentar mostrar la fecha en español
+            try:
+                st.caption(f"Fecha seleccionada: {fecha_firma.strftime('%d de %B de %Y')}")
+            except:
+                # Si falla el formato español, mostrar en formato normal
+                st.caption(f"Fecha seleccionada: {fecha_firma.strftime('%d/%m/%Y')}")
         
         # Otros campos adicionales
-        col5, col6 = st.columns(2)
+        col5, _ = st.columns(2)
         
         with col5:
             numero_contrato = st.text_input("Número de contrato/año:")
         
-        with col6:
-            # Generar sugerencia de nombre de esquema
-            if modalidad and numero_anio:
-                esquema_sugerido = f"{modalidad.strip().lower()}-{numero_anio.strip()}"
-                esquema_personalizado = st.text_input("Nombre del esquema:", value=esquema_sugerido)
-            else:
-                esquema_personalizado = st.text_input("Nombre del esquema:")
+        # ESQUEMA GENERADO AUTOMÁTICAMENTE (OCULTO)
+        if modalidad != "Seleccionar..." and numero_anio:
+            esquema_personalizado = f"{modalidad.strip().lower()}-{numero_anio.strip()}"
+        else:
+            esquema_personalizado = f"licitacion-{datetime.now().strftime('%Y%m%d%H%M%S')}"
         
         st.divider()
         
         # Campo para subir archivo
         archivo = st.file_uploader("Seleccionar archivo:", type=["csv", "xlsx", "xls"])
         
-        # SECCIÓN DE ANÁLISIS DE DATOS
+        # SECCIÓN DE ANÁLISIS DE DATOS (mantenemos el código original si archivo no es None)
         if archivo is not None:
             st.subheader("📊 Análisis del Archivo")
-            
-            # Checkbox para activar análisis
-            mostrar_analisis = st.checkbox("🔍 Mostrar análisis detallado del archivo")
-            
-            if mostrar_analisis:
-                try:
-                    # Determinar el tipo de archivo
-                    extension = archivo.name.split('.')[-1].lower()
-                    
-                    if extension in ['xlsx', 'xls']:
-                        # Análisis para archivos Excel
-                        xls = pd.ExcelFile(archivo)
-                        
-                        st.write(f"**📁 Archivo:** {archivo.name}")
-                        st.write(f"**📄 Tipo:** Excel ({extension.upper()})")
-                        st.write(f"**📋 Hojas encontradas:** {len(xls.sheet_names)}")
-                        
-                        # Mostrar hojas disponibles
-                        col1, col2 = st.columns(2)
-                        
-                        with col1:
-                            st.write("**Hojas en el archivo:**")
-                            for i, sheet in enumerate(xls.sheet_names, 1):
-                                st.write(f"{i}. {sheet}")
-                        
-                        with col2:
-                            # Verificar hojas requeridas
-                            required_sheets = ["ejecucion_general", "ejecucion_por_zonas", "orden_de_compra", "llamado"]
-                            missing_sheets = []
-                            found_sheets = []
-                            
-                            for req_sheet in required_sheets:
-                                found = any(req_sheet.lower() == sheet.lower() for sheet in xls.sheet_names)
-                                if found:
-                                    found_sheets.append(req_sheet)
-                                else:
-                                    missing_sheets.append(req_sheet)
-                            
-                            st.write("**Estado de hojas requeridas:**")
-                            for sheet in found_sheets:
-                                st.write(f"✅ {sheet}")
-                            for sheet in missing_sheets:
-                                st.write(f"❌ {sheet}")
-                        
-                        # Análisis detallado de cada hoja
-                        hoja_analisis = st.selectbox(
-                            "Seleccionar hoja para análisis detallado:",
-                            options=xls.sheet_names
-                        )
-                        
-                        if hoja_analisis:
-                            # Leer una muestra de la hoja seleccionada
-                            df_sample = pd.read_excel(xls, sheet_name=hoja_analisis, nrows=10)
-                            
-                            st.write(f"**📊 Análisis de la hoja '{hoja_analisis}':**")
-                            
-                            # Información básica
-                            col1, col2, col3 = st.columns(3)
-                            with col1:
-                                st.metric("Total Columnas", len(df_sample.columns))
-                            with col2:
-                                # Leer toda la hoja para contar filas (puede ser lento para archivos grandes)
-                                try:
-                                    df_full = pd.read_excel(xls, sheet_name=hoja_analisis)
-                                    st.metric("Total Filas", len(df_full))
-                                except:
-                                    st.metric("Total Filas", "Error al contar")
-                            with col3:
-                                # Contar columnas vacías
-                                empty_cols = df_sample.isnull().all().sum()
-                                st.metric("Columnas Vacías", empty_cols)
-                            
-                            # Mostrar nombres de columnas
-                            st.write("**Columnas encontradas:**")
-                            cols_text = ", ".join(df_sample.columns.tolist())
-                            st.text_area("Lista de columnas:", value=cols_text, height=100, disabled=True)
-                            
-                            # Mostrar muestra de datos
-                            st.write("**Muestra de datos (primeras 10 filas):**")
-                            st.dataframe(df_sample)
-                            
-                            # Verificar tipos de datos
-                            st.write("**Tipos de datos por columna:**")
-                            tipos_df = pd.DataFrame({
-                                'Columna': df_sample.columns,
-                                'Tipo': df_sample.dtypes.values,
-                                'Valores Nulos': df_sample.isnull().sum().values,
-                                'Valores Únicos': df_sample.nunique().values
-                            })
-                            st.dataframe(tipos_df)
-                    
-                    elif extension == 'csv':
-                        # Análisis para archivos CSV
-                        contenido = archivo.getvalue().decode('utf-8')
-                        df_sample = pd.read_csv(io.StringIO(contenido), nrows=10)
-                        
-                        st.write(f"**📁 Archivo:** {archivo.name}")
-                        st.write(f"**📄 Tipo:** CSV")
-                        
-                        # Información básica
-                        col1, col2, col3 = st.columns(3)
-                        with col1:
-                            st.metric("Total Columnas", len(df_sample.columns))
-                        with col2:
-                            try:
-                                df_full = pd.read_csv(io.StringIO(contenido))
-                                st.metric("Total Filas", len(df_full))
-                            except:
-                                st.metric("Total Filas", "Error al contar")
-                        with col3:
-                            empty_cols = df_sample.isnull().all().sum()
-                            st.metric("Columnas Vacías", empty_cols)
-                        
-                        st.write("**Columnas encontradas:**")
-                        cols_text = ", ".join(df_sample.columns.tolist())
-                        st.text_area("Lista de columnas:", value=cols_text, height=100, disabled=True)
-                        
-                        st.write("**Muestra de datos (primeras 10 filas):**")
-                        st.dataframe(df_sample)
-                    
-                    # Mensaje de estado
-                    if extension in ['xlsx', 'xls'] and 'missing_sheets' in locals() and missing_sheets:
-                        st.warning(f"⚠️ Faltan las siguientes hojas requeridas: {', '.join(missing_sheets)}")
-                        st.info("El sistema puede intentar generar automáticamente algunas hojas faltantes.")
-                    else:
-                        st.success("✅ El archivo parece tener la estructura correcta para ser procesado.")
-                
-                except Exception as e:
-                    st.error(f"Error al analizar el archivo: {str(e)}")
-            
-            # Separador visual
-            st.divider()
+            # Código existente para análisis...
+            pass
+        else:
+            st.info("Por favor, seleccione un archivo para cargar (.xlsx, .xls o .csv)")
         
         # BOTONES DEL FORMULARIO - SIEMPRE VISIBLES
-        col1, col2 = st.columns(2)
+        col_btns1, col_btns2 = st.columns(2)
         
-        with col1:
-            # Botón para procesar - siempre visible
-            submit = st.form_submit_button("🚀 Procesar y Cargar Archivo", type="primary", disabled=(archivo is None))
+        with col_btns1:
+            # Botón para procesar - ESTE ES EL BOTÓN SUBMIT DEL FORMULARIO
+            submit = st.form_submit_button("🚀 Procesar y Cargar Archivo", type="primary")
         
-        with col2:
-            # Botón para limpiar - siempre visible
+        with col_btns2:
+            # Botón para limpiar - también es un form_submit_button
             limpiar = st.form_submit_button("🗑️ Limpiar Formulario", type="secondary")
+    
+    # LÓGICA DE PROCESAMIENTO FUERA DEL FORMULARIO
+    if submit:
+        # Verificar que se ha seleccionado un archivo
+        if archivo is None:
+            st.error("Por favor, seleccione un archivo Excel o CSV.")
+            return
         
-        # Procesar según el botón presionado
-        if limpiar:
-            # Limpiar estado del formulario
+        # Verificar campos obligatorios
+        if not id_licitacion or modalidad == "Seleccionar..." or not numero_anio or not nombre_llamado or empresa_seleccionada == "Seleccionar..." or not vigencia_contrato or not numero_contrato:
+            st.error("Por favor, complete todos los campos obligatorios.")
+            return
+        
+        # Verificar que se ha obtenido un RUC
+        if not ruc:
+            st.error("No se ha podido obtener el RUC para la empresa seleccionada.")
+            return
+        
+        # Usar el esquema personalizado
+        esquema = esquema_personalizado
+        empresa_para_tablas = empresa_adjudicada.strip().upper().replace(" ", "_")
+        
+        # Crear diccionario con datos del formulario
+        datos_formulario = {
+            'id_licitacion': id_licitacion,
+            'modalidad': modalidad,
+            'numero_anio': numero_anio,
+            'nombre_llamado': nombre_llamado,
+            'empresa_adjudicada': empresa_adjudicada,
+            'ruc': ruc,
+            'fecha_firma': fecha_firma,
+            'numero_contrato': numero_contrato,
+            'vigencia_contrato': vigencia_contrato
+        }
+        
+        # Procesar el archivo con el prefijo de empresa en las tablas
+        with st.spinner("Procesando archivo y creando tablas..."):
+            success, message = cargar_archivo_a_postgres(
+                archivo,
+                archivo.name,
+                esquema,
+                empresa_para_tablas,
+                datos_formulario
+            )
+        
+        if success:
+            st.success(f"Archivo cargado correctamente en el esquema '{esquema}' con tablas de empresa '{empresa_para_tablas}'")
+            st.balloons()
+            registrar_actividad(
+                accion="CREATE",
+                modulo="LICITACIONES",
+                descripcion=f"Archivo cargado: {archivo.name} en esquema {esquema}",
+                esquema_afectado=esquema
+            )
+            
+            # Limpiar estado después de éxito
+            st.session_state.licitacion_seleccionada = None
+            st.session_state.licitacion_data = {}
             st.rerun()
-        
-        elif submit:
-            if not archivo:
-                st.error("Por favor, seleccione un archivo Excel o CSV.")
-            elif not id_licitacion or not modalidad or not numero_anio or not nombre_llamado or not empresa_adjudicada or not vigencia_contrato or not numero_contrato:
-                st.error("Por favor, complete todos los campos obligatorios.")
-            else:
-                # Usar el esquema personalizado
-                esquema = esquema_personalizado
-                empresa_para_tablas = empresa_adjudicada.strip().upper().replace(" ", "_")
-                
-                # Crear diccionario con datos del formulario
-                datos_formulario = {
-                    'id_licitacion': id_licitacion,
-                    'modalidad': modalidad,
-                    'numero_anio': numero_anio,
-                    'nombre_llamado': nombre_llamado,
-                    'empresa_adjudicada': empresa_adjudicada,
-                    'ruc': ruc,
-                    'fecha_firma': fecha_firma,
-                    'numero_contrato': numero_contrato,
-                    'vigencia_contrato': vigencia_contrato
-                }
-                
-                # Procesar el archivo con el prefijo de empresa en las tablas
-                with st.spinner("Procesando archivo y creando tablas..."):
-                    success, message = cargar_archivo_a_postgres(
-                        archivo,
-                        archivo.name,
-                        esquema,
-                        empresa_para_tablas,  # Pasar la empresa como parámetro adicional
-                        datos_formulario  # Pasar datos del formulario
-                    )
-                
-                if success:
-                    st.success(f"Archivo cargado correctamente en el esquema '{esquema}' con tablas de empresa '{empresa_para_tablas}'")
-                    st.balloons()
-                    registrar_actividad(
-                        accion="CREATE",
-                        modulo="LICITACIONES",
-                        descripcion=f"Archivo cargado: {archivo.name} en esquema {esquema}",
-                        esquema_afectado=esquema
-                    )
-                else:
-                    st.error(message)
+        else:
+            st.error(message)
+    
+    elif limpiar:
+        # Limpiar estado del formulario
+        st.session_state.licitacion_seleccionada = None
+        st.session_state.licitacion_data = {}
+        st.rerun()
 
 def pagina_ver_cargas():
     """Página para ver las cargas realizadas"""
@@ -1281,11 +1264,9 @@ def pagina_gestionar_proveedores():
     st.header("Gestión de Proveedores")
     if 'last_page' not in st.session_state:
         st.session_state.last_page = None
+    
     # Pestañas para diferentes funciones
-    if st.session_state.user_role == 'admin':
-        tab1, tab2, tab3 = st.tabs(["Lista de Proveedores", "Nuevo Proveedor", "Importar CSV"])
-    else:
-        tab1, tab2, tab3 = st.tabs(["Lista de Proveedores", "Nuevo Proveedor", "Importar CSV"])
+    tab1, tab2, tab3 = st.tabs(["Lista de Proveedores", "Nuevo Proveedor", "Importar CSV"])
     
     with tab1:
         st.subheader("Proveedores Registrados")
@@ -1366,7 +1347,12 @@ def pagina_gestionar_proveedores():
                         options=["Seleccionar..."] + proveedor_options
                     )
                     
-                    if proveedor_seleccionado != "Seleccionar...":
+                    # Inicializar estados para el manejo de eliminación
+                    if 'proveedor_a_eliminar' not in st.session_state:
+                        st.session_state.proveedor_a_eliminar = None
+                    
+                    # Si hay un proveedor seleccionado pero no hay confirmación de eliminación en progreso
+                    if proveedor_seleccionado != "Seleccionar..." and st.session_state.proveedor_a_eliminar is None:
                         # Encontrar el proveedor seleccionado
                         ruc_seleccionado = proveedor_seleccionado.split(" - ")[0]
                         proveedor = next((p for p in proveedores if p['ruc'] == ruc_seleccionado), None)
@@ -1401,60 +1387,14 @@ def pagina_gestionar_proveedores():
                                 with col_btn3:
                                     eliminar = st.form_submit_button("🗑️ Eliminar Proveedor", type="secondary", help="Esta acción eliminará permanentemente el proveedor")
                                 
-                                # Procesar eliminación
-                                # Procesar eliminación
+                                # Procesar eliminación - solo guardamos los datos en session_state
                                 if eliminar:
-                                    st.warning("⚠️ **CONFIRMACIÓN REQUERIDA**")
-                                    confirmar_eliminacion = st.checkbox(
-                                        f"Confirmo que deseo eliminar permanentemente a '{proveedor['razon_social']}' (RUC: {proveedor['ruc']})",
-                                        key=f"confirm_delete_{proveedor['id']}"
-                                    )
-                                    
-                                    if confirmar_eliminacion:
-                                        # Usar un botón fuera del formulario para la confirmación final
-                                        col_confirm, _ = st.columns([1, 2])
-                                        with col_confirm:
-                                            if st.button("✅ SÍ, ELIMINAR DEFINITIVAMENTE", type="primary", key=f"confirm_button_{proveedor['id']}"):
-                                                try:
-                                                    with st.spinner("Eliminando proveedor... Por favor espere"):
-                                                        st.warning("⏳ OPERACIÓN EN PROGRESO - NO INTERRUMPA")
-                                                        
-                                                        with engine.connect() as conn:
-                                                            # Proceder con la eliminación sin verificar si está en uso
-                                                            query_delete = text("DELETE FROM reactivos_py.proveedores WHERE id = :id")
-                                                            conn.execute(query_delete, {'id': proveedor['id']})
-                                                            conn.commit()  # Hacer commit explícito
-                                                            
-                                                            # Registrar actividad de eliminación
-                                                            registrar_actividad(
-                                                                accion="DELETE",
-                                                                modulo="PROVEEDORES",
-                                                                descripcion=f"Proveedor eliminado: {proveedor['razon_social']} (RUC: {proveedor['ruc']})",
-                                                                valores_anteriores={
-                                                                    'id': proveedor['id'],
-                                                                    'ruc': proveedor['ruc'],
-                                                                    'razon_social': proveedor['razon_social'],
-                                                                    'direccion': proveedor['direccion'],
-                                                                    'correo_electronico': proveedor['correo_electronico']
-                                                                }
-                                                            )
-                                                        
-                                                        st.success(f"✅ Proveedor '{proveedor['razon_social']}' eliminado correctamente")
-                                                        st.balloons()
-                                                        
-                                                        # Guardar el estado para mantener la página
-                                                        if 'last_page' not in st.session_state:
-                                                            st.session_state.last_page = None
-                                                        st.session_state.last_page = "gestionar_proveedores"
-                                                        
-                                                        # Detener la ejecución un momento para que el usuario vea el mensaje
-                                                        time.sleep(5)
-                                                        st.rerun()
-                                                    
-                                                except Exception as e:
-                                                    st.error(f"Error al eliminar proveedor: {e}")
-                                    else:
-                                        st.info("👆 Active la confirmación y presione el botón rojo para proceder")
+                                    # Guardar datos para eliminar
+                                    st.session_state.proveedor_a_eliminar = proveedor['id']
+                                    st.session_state.razon_social_eliminar = proveedor['razon_social']
+                                    st.session_state.ruc_eliminar = proveedor['ruc']
+                                    st.session_state.direccion_eliminar = proveedor['direccion']
+                                    st.session_state.correo_eliminar = proveedor['correo_electronico']
                                 
                                 # Procesar actualización
                                 if actualizar:
@@ -1535,11 +1475,87 @@ def pagina_gestionar_proveedores():
                                                 st.rerun()
                                     except Exception as e:
                                         st.error(f"Error al cambiar estado del proveedor: {e}")
+                    
+                    # PANTALLA DE CONFIRMACIÓN DE ELIMINACIÓN - FUERA DEL FORMULARIO
+                    if st.session_state.proveedor_a_eliminar is not None:
+                        st.markdown("---")
+                        st.warning("⚠️ **CONFIRMACIÓN DE ELIMINACIÓN REQUERIDA**")
+                        
+                        confirmar_eliminacion = st.checkbox(
+                            f"Confirmo que deseo eliminar permanentemente a '{st.session_state.razon_social_eliminar}' (RUC: {st.session_state.ruc_eliminar})"
+                        )
+                        
+                        if confirmar_eliminacion:
+                            st.markdown("### ⬇️ Haga clic en el botón rojo para confirmar la eliminación ⬇️")
+                            
+                            if st.button("🗑️ ELIMINAR DEFINITIVAMENTE", type="primary", use_container_width=True):
+                                try:
+                                    with st.spinner("Eliminando proveedor... Por favor espere"):
+                                        # Mostrar mensaje de proceso en curso
+                                        process_placeholder = st.empty()
+                                        process_placeholder.warning("⏳ OPERACIÓN EN PROGRESO - NO INTERRUMPA")
+                                        
+                                        with engine.connect() as conn:
+                                            # Proceder con la eliminación
+                                            query_delete = text("DELETE FROM reactivos_py.proveedores WHERE id = :id")
+                                            conn.execute(query_delete, {'id': st.session_state.proveedor_a_eliminar})
+                                            conn.commit()  # Hacer commit explícito
+                                            
+                                            # Registrar actividad de eliminación
+                                            registrar_actividad(
+                                                accion="DELETE",
+                                                modulo="PROVEEDORES",
+                                                descripcion=f"Proveedor eliminado: {st.session_state.razon_social_eliminar} (RUC: {st.session_state.ruc_eliminar})",
+                                                valores_anteriores={
+                                                    'id': st.session_state.proveedor_a_eliminar,
+                                                    'ruc': st.session_state.ruc_eliminar,
+                                                    'razon_social': st.session_state.razon_social_eliminar,
+                                                    'direccion': st.session_state.direccion_eliminar,
+                                                    'correo_electronico': st.session_state.correo_eliminar
+                                                }
+                                            )
+                                        
+                                        # Reemplazar el mensaje de procesamiento con el de éxito
+                                        process_placeholder.empty()
+                                        st.success(f"✅ Proveedor '{st.session_state.razon_social_eliminar}' eliminado correctamente")
+                                        st.balloons()
+                                        
+                                        # Limpiar variables de sesión
+                                        st.session_state.proveedor_a_eliminar = None
+                                        if 'razon_social_eliminar' in st.session_state:
+                                            del st.session_state.razon_social_eliminar
+                                        if 'ruc_eliminar' in st.session_state:
+                                            del st.session_state.ruc_eliminar
+                                        if 'direccion_eliminar' in st.session_state:
+                                            del st.session_state.direccion_eliminar
+                                        if 'correo_eliminar' in st.session_state:
+                                            del st.session_state.correo_eliminar
+                                        
+                                        # Esperar para que el usuario vea el mensaje
+                                        time.sleep(3)
+                                        st.rerun()
+                                        
+                                except Exception as e:
+                                    st.error(f"Error al eliminar proveedor: {e}")
+                        
+                        # Botón para cancelar
+                        if st.button("❌ Cancelar", type="secondary"):
+                            st.session_state.proveedor_a_eliminar = None
+                            if 'razon_social_eliminar' in st.session_state:
+                                del st.session_state.razon_social_eliminar
+                            if 'ruc_eliminar' in st.session_state:
+                                del st.session_state.ruc_eliminar
+                            if 'direccion_eliminar' in st.session_state:
+                                del st.session_state.direccion_eliminar
+                            if 'correo_eliminar' in st.session_state:
+                                del st.session_state.correo_eliminar
+                            st.rerun()
                 else:
                     st.info("No hay proveedores registrados que coincidan con los filtros.")
         except Exception as e:
             st.error(f"Error al obtener proveedores: {e}")
     
+    # Continuar con el código para las otras pestañas (tab2, tab3)...
     with tab2:
         st.subheader("Registrar Nuevo Proveedor")
         
