@@ -154,7 +154,6 @@ def configurar_tabla_proveedores():
     """Crea la tabla de proveedores si no existe"""
     try:
         with engine.connect() as conn:
-            # Crear esquema si no existe
             conn.execute(text("""
                 CREATE SCHEMA IF NOT EXISTS reactivos_py;
             """))
@@ -162,9 +161,16 @@ def configurar_tabla_proveedores():
             conn.execute(text("""
                 CREATE TABLE IF NOT EXISTS reactivos_py.proveedores (
                     id SERIAL PRIMARY KEY,
-                    nombre VARCHAR(200) NOT NULL,
                     ruc VARCHAR(50) UNIQUE NOT NULL,
-                    fecha_registro TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    razon_social VARCHAR(200) NOT NULL,
+                    direccion TEXT,
+                    correo_electronico VARCHAR(100),
+                    telefono VARCHAR(50),
+                    contacto_nombre VARCHAR(100),
+                    observaciones TEXT,
+                    activo BOOLEAN DEFAULT TRUE,
+                    fecha_registro TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    fecha_actualizacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
             """))
             
@@ -1522,12 +1528,106 @@ def pagina_gestionar_proveedores():
                     f"Confirmo la importación de {registros_procesables:,} registros procesables",
                     help="Esta acción insertará todos los registros válidos en la base de datos"
                 )
-                if insertados > 0:
-                    registrar_actividad(
-                        accion="IMPORT",
-                        modulo="PROVEEDORES",
-                        descripcion=f"Importación CSV: {insertados} insertados, {duplicados} duplicados"
-                    )
+
+                # Después del checkbox confirmar_importacion, agregar:
+                if confirmar_importacion:
+                    if st.button("🚀 Importar Proveedores", type="primary"):
+                        try:
+                            insertados = 0
+                            duplicados = 0
+                            errores = 0
+                            errores_detalle = []
+                            
+                            progress_bar = st.progress(0)
+                            status_text = st.empty()
+                            
+                            total_filas = len(df)
+                            
+                            for index, row in df.iterrows():
+                                try:
+                                    progress = (index + 1) / total_filas
+                                    progress_bar.progress(progress)
+                                    status_text.text(f'Procesando fila {index + 1} de {total_filas}...')
+                                    
+                                    ruc = str(row[col_ruc]).strip()
+                                    razon_social = str(row[col_razon]).strip()
+                                    direccion = str(row[col_direccion]).strip() if col_direccion != "No mapear" and pd.notna(row[col_direccion]) else None
+                                    correo = str(row[col_correo]).strip() if col_correo != "No mapear" and pd.notna(row[col_correo]) else None
+                                    
+                                    if not ruc or not razon_social or ruc.lower() == "nan" or razon_social.lower() == "nan":
+                                        errores += 1
+                                        errores_detalle.append(f"Fila {index + 1}: RUC o Razón Social vacíos")
+                                        continue
+                                    
+                                    with engine.connect() as conn:
+                                        trans = conn.begin()
+                                        try:
+                                            query = text("""
+                                                INSERT INTO reactivos_py.proveedores (ruc, razon_social, direccion, correo_electronico)
+                                                VALUES (:ruc, :razon_social, :direccion, :correo)
+                                                ON CONFLICT (ruc) DO NOTHING
+                                                RETURNING id
+                                            """)
+                                            
+                                            result = conn.execute(query, {
+                                                'ruc': ruc,
+                                                'razon_social': razon_social,
+                                                'direccion': direccion,
+                                                'correo': correo
+                                            })
+                                            
+                                            if result.rowcount > 0:
+                                                trans.commit()
+                                                insertados += 1
+                                            else:
+                                                trans.rollback()
+                                                duplicados += 1
+                                                errores_detalle.append(f"Fila {index + 1}: RUC {ruc} ya existe")
+                                            
+                                        except Exception as e:
+                                            trans.rollback()
+                                            errores += 1
+                                            errores_detalle.append(f"Fila {index + 1}: Error - {str(e)}")
+                                
+                                except Exception as e:
+                                    errores += 1
+                                    errores_detalle.append(f"Fila {index + 1}: Error general - {str(e)}")
+                            
+                            progress_bar.empty()
+                            status_text.empty()
+                            
+                            col1, col2, col3 = st.columns(3)
+                            with col1:
+                                st.metric("✅ Insertados", insertados)
+                            with col2:
+                                st.metric("⚠️ Duplicados", duplicados)
+                            with col3:
+                                st.metric("❌ Errores", errores)
+                            
+                            if errores_detalle:
+                                with st.expander(f"📋 Detalles ({len(errores_detalle)} issues)"):
+                                    for detalle in errores_detalle:
+                                        if "duplicado" in detalle.lower() or "ya existe" in detalle.lower():
+                                            st.warning(detalle)
+                                        else:
+                                            st.error(detalle)
+                            
+                            if insertados > 0:
+                                st.success(f"✅ Importación completada: {insertados} nuevos registros")
+                                # ← MOVER EL registrar_actividad AQUÍ
+                                registrar_actividad(
+                                    accion="IMPORT",
+                                    modulo="PROVEEDORES",
+                                    descripcion=f"Importación CSV: {insertados} insertados, {duplicados} duplicados, {errores} errores"
+                                )
+                            
+                            if 'df_importar' in st.session_state:
+                                del st.session_state.df_importar
+                                del st.session_state.delimiter_usado
+                                del st.session_state.encoding_usado
+                                
+                        except Exception as e:
+                            st.error(f"Error durante la importación: {e}")
 
 def pagina_administrar_usuarios():
     """Página para administrar usuarios"""
@@ -2944,6 +3044,7 @@ def main():
             "ver_cargas": "📋 Ver Cargas",
             "ordenes_compra": "📝 Órdenes de Compra",
             "gestionar_proveedores": "🏭 Gestión de Proveedores",
+            "historial_actividades": "📋 Historial de Actividades",
             "cambiar_password": "🔑 Cambiar Contraseña",
             "logout": "🚪 Cerrar Sesión"
         }
