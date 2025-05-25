@@ -427,283 +427,273 @@ def obtener_esquemas_postgres():
         st.error(f"Error obteniendo esquemas: {e}")
         return []
 
-def cargar_archivo_a_postgres(archivo, nombre_archivo, esquema, empresa_prefijo=None, datos_formulario=None):
+import openpyxl
+import pandas as pd
+
+def cargar_archivo_a_postgres(archivo_excel, nombre_archivo, esquema):
     """
-    Carga un archivo Excel o CSV directamente a PostgreSQL.
-    Crea automáticamente el esquema y las tablas con el prefijo de la empresa adjudicada.
-    
-    Args:
-        archivo: Archivo Excel o CSV cargado
-        nombre_archivo: Nombre del archivo
-        esquema: Nombre del esquema a crear (basado en modalidad-numero/año)
-        empresa_prefijo: Prefijo para las tablas (opcional, se genera a partir de empresa_adjudicada)
-        datos_formulario: Diccionario con datos del formulario
-    
-    Returns:
-        tuple: (success, message)
+    Carga un archivo Excel directamente a PostgreSQL creando las 4 tablas del esquema
     """
     try:
-        # Obtener el nombre de la empresa para el prefijo de las tablas
-        if not empresa_prefijo and datos_formulario and 'empresa_adjudicada' in datos_formulario:
-            empresa_prefijo = datos_formulario['empresa_adjudicada'].strip().upper().replace(" ", "_").replace(".", "")
+        # Leer el contenido del archivo Excel
+        archivo_excel.seek(0)  # Reiniciar el puntero del archivo
         
-        # Formatear el esquema para que sea válido en PostgreSQL
-        # IMPORTANTE: Reemplazar guiones por guiones bajos para evitar problemas
-        esquema_formateado = esquema.strip().lower().replace('/', '_').replace(' ', '_').replace('-', '_')
+        # Leer todas las hojas del Excel
+        excel_data = pd.read_excel(archivo_excel, sheet_name=None, engine='openpyxl')
         
-        # Mostrar información de debug
-        print(f"Creando esquema: {esquema_formateado}")
-        print(f"Prefijo de empresa: {empresa_prefijo}")
+        # Verificar que existan las hojas necesarias
+        hojas_requeridas = ['llamado', 'ejecucion_general', 'orden_de_compra', 'ejecucion_por_zonas']
+        hojas_encontradas = list(excel_data.keys())
         
-        # Crear el esquema y las tablas
+        # Validar hojas
+        for hoja in hojas_requeridas:
+            if hoja not in hojas_encontradas:
+                return False, f"Error: Falta la hoja '{hoja}' en el archivo Excel. Hojas encontradas: {hojas_encontradas}"
+        
+        # Formatear el nombre del esquema
+        esquema_formateado = esquema.strip().lower().replace(' ', '_').replace('-', '_')
+        
         with engine.connect() as conn:
-            # 1. Crear el esquema si no existe - USANDO COMILLAS DOBLES
-            conn.execute(text(f'CREATE SCHEMA IF NOT EXISTS "{esquema_formateado}"'))
-            
-            # 2. Crear las tablas usando TO_SQL en lugar de SQL directo
-            # Primero crear tablas vacías con la estructura correcta
-            estructura_llamado = pd.DataFrame({
-                'I_D': pd.Series(dtype='object'),
-                'NUMERO DE LLAMADO': pd.Series(dtype='object'),
-                'AÑO DEL LLAMADO': pd.Series(dtype='object'),
-                'NOMBRE_DEL_LLAMADO': pd.Series(dtype='object'),
-                'EMPRESA_ADJUDICADA': pd.Series(dtype='object'),
-                'RUC': pd.Series(dtype='object'),
-                'FECHA_FIRMA_CONTRATO': pd.Series(dtype='datetime64[ns]'),
-                'NUMERO_CONTRATO': pd.Series(dtype='object'),
-                'VIGENCIA_CONTRATO': pd.Series(dtype='object'),
-                'Fecha de Inicio de Poliza': pd.Series(dtype='datetime64[ns]'),
-                'Fecha de Finalizacion de Poliza': pd.Series(dtype='datetime64[ns]')
-            })
-            
-            estructura_ejecucion_general = pd.DataFrame({
-                'COMODATO // SIN COMODATO': pd.Series(dtype='object'),
-                'ESTADO DEL LOTE / ITEM': pd.Series(dtype='object'),
-                'LOTE': pd.Series(dtype='object'),
-                'ITEM': pd.Series(dtype='object'),
-                'DESCRIPCION DEL PRODUCTO': pd.Series(dtype='object'),
-                'DESCRIPCION DEL PRODUCTO // MARCA // PROCEDENCIA': pd.Series(dtype='object'),
-                'UNIDAD DE MEDIDA': pd.Series(dtype='object'),
-                'PRECIO UNITARIO': pd.Series(dtype='float64'),
-                'REDISTRIBUCION (CANTIDAD MAXIMA)': pd.Series(dtype='float64'),
-                'CANTIDAD EMITIDA': pd.Series(dtype='float64'),
-                'SALDO A EMITIR': pd.Series(dtype='float64'),
-                'PORCENTAJE EMITIDO': pd.Series(dtype='float64')
-            })
-            
-            estructura_ejecucion_zonas = pd.DataFrame({
-                'CODIGO DE REACTIVOS / INSUMOS + CODIGO DE SERVICIO BENEFICIARIO': pd.Series(dtype='object'),
-                'SERVICIO BENEFICIARIO': pd.Series(dtype='object'),
-                'LOTE': pd.Series(dtype='object'),
-                'ITEM': pd.Series(dtype='object'),
-                'DESCRIPCION DEL PRODUCTO // MARCA // PROCEDENCIA': pd.Series(dtype='object'),
-                'PRECIO UNITARIO': pd.Series(dtype='float64'),
-                'REDISTRIBUCION (CANTIDAD MAXIMA)': pd.Series(dtype='float64')
-            })
-            
-            estructura_orden_compra = pd.DataFrame({
-                'SIMESE (PEDIDO)': pd.Series(dtype='object'),
-                'N° ORDEN DE COMPRA': pd.Series(dtype='object'),
-                'SERVICIO BENEFICIARIO': pd.Series(dtype='object'),
-                'LOTE': pd.Series(dtype='object'),
-                'ITEM': pd.Series(dtype='object'),
-                'CANTIDAD SOLICITADA': pd.Series(dtype='float64')
-            })
-            
-            # Crear tablas vacías con la estructura básica
+            # Iniciar transacción
+            trans = conn.begin()
             try:
-                # Usar dtype_backend='numpy' para evitar problemas de tipos de datos
-                estructura_llamado.to_sql(
-                    f"{empresa_prefijo}_llamado", 
-                    con=engine, 
-                    schema=esquema_formateado, 
-                    if_exists='replace', 
-                    index=False,
-                    method='multi'
-                )
+                # 1. Crear el esquema si no existe
+                conn.execute(text(f'CREATE SCHEMA IF NOT EXISTS "{esquema_formateado}"'))
                 
-                estructura_ejecucion_general.to_sql(
-                    f"{empresa_prefijo}_ejecucion_general", 
-                    con=engine, 
-                    schema=esquema_formateado, 
-                    if_exists='replace', 
-                    index=False,
-                    method='multi'
-                )
+                # 2. Crear y cargar tabla 'llamado'
+                df_llamado = excel_data['llamado']
+                crear_tabla_llamado(conn, esquema_formateado, df_llamado)
                 
-                estructura_ejecucion_zonas.to_sql(
-                    f"{empresa_prefijo}_ejecucion_por_zonas", 
-                    con=engine, 
-                    schema=esquema_formateado, 
-                    if_exists='replace', 
-                    index=False,
-                    method='multi'
-                )
+                # 3. Crear y cargar tabla 'ejecucion_general'
+                df_ejecucion_general = excel_data['ejecucion_general']
+                crear_tabla_ejecucion_general(conn, esquema_formateado, df_ejecucion_general)
                 
-                estructura_orden_compra.to_sql(
-                    f"{empresa_prefijo}_orden_de_compra", 
-                    con=engine, 
-                    schema=esquema_formateado, 
-                    if_exists='replace', 
-                    index=False,
-                    method='multi'
-                )
+                # 4. Crear y cargar tabla 'orden_de_compra'
+                df_orden_compra = excel_data['orden_de_compra']
+                crear_tabla_orden_compra(conn, esquema_formateado, df_orden_compra)
                 
-                print("Tablas vacías creadas con éxito")
+                # 5. Crear y cargar tabla 'ejecucion_por_zonas'
+                df_ejecucion_zonas = excel_data['ejecucion_por_zonas']
+                crear_tabla_ejecucion_por_zonas(conn, esquema_formateado, df_ejecucion_zonas)
+                
+                # 6. Guardar registro del archivo en la tabla de control
+                contenido_original = archivo_excel.getvalue()
+                query = text("""
+                    INSERT INTO archivos_cargados 
+                    (nombre_archivo, esquema, usuario_id, contenido_original)
+                    VALUES (:nombre, :esquema, :usuario_id, :contenido)
+                    RETURNING id
+                """)
+                
+                result = conn.execute(query, {
+                    'nombre': nombre_archivo,
+                    'esquema': esquema_formateado,
+                    'usuario_id': st.session_state.user_id,
+                    'contenido': contenido_original.decode('latin1')  # Para archivos binarios
+                })
+                
+                archivo_id = result.scalar()
+                
+                # Confirmar transacción
+                trans.commit()
+                
+                return True, f"Archivo Excel cargado correctamente en esquema '{esquema_formateado}' con ID: {archivo_id}"
+                
             except Exception as e:
-                print(f"Error al crear tablas vacías: {e}")
+                # Revertir transacción en caso de error
+                trans.rollback()
                 raise e
-        
-        # Procesar el archivo Excel o CSV
-        if archivo.name.endswith(('.xlsx', '.xls')):
-            try:
-                # Reiniciar el archivo para lectura
-                archivo.seek(0)
                 
-                # Leer el archivo Excel
-                xls = pd.ExcelFile(archivo)
-                
-                # Comprobar que existan las hojas requeridas
-                required_sheets = ["llamado", "ejecucion_general", "ejecucion_por_zonas", "orden_de_compra"]
-                missing_sheets = [sheet for sheet in required_sheets if sheet not in xls.sheet_names]
-                
-                if missing_sheets:
-                    return False, f"Error: Faltan las siguientes hojas en el Excel: {', '.join(missing_sheets)}"
-                
-                # Procesar cada hoja
-                with engine.connect() as conn:
-                    # 1. Procesar hoja 'llamado'
-                    df_llamado = pd.read_excel(xls, sheet_name="llamado")
-                    
-                    # Mapear columnas del Excel a las columnas esperadas
-                    if 'I.D.' in df_llamado.columns:
-                        df_llamado = df_llamado.rename(columns={
-                            'I.D.': 'I_D',
-                            'Numero de llamado': 'NUMERO DE LLAMADO',
-                            'Año del Llamado': 'AÑO DEL LLAMADO',
-                            'NOMBRE DEL LLAMADO': 'NOMBRE_DEL_LLAMADO',
-                            'EMPRESA ADJUDICADA': 'EMPRESA_ADJUDICADA',
-                            'FECHA DE FIRMA DEL CONTRATO:': 'FECHA_FIRMA_CONTRATO',
-                            'N° de Contrato / Año:': 'NUMERO_CONTRATO',
-                            'Vigencia del Contrato:': 'VIGENCIA_CONTRATO'
-                        })
-                    
-                    # Agregar columna RUC si no existe
-                    if 'RUC' not in df_llamado.columns:
-                        df_llamado['RUC'] = datos_formulario.get('ruc', '') if datos_formulario else ''
-                    
-                    # Limpiar DataFrame
-                    df_llamado = df_llamado.replace({np.nan: None})
-                    
-                    # Guardar en la tabla con prefijo
-                    df_llamado.to_sql(
-                        f"{empresa_prefijo}_llamado", 
-                        con=engine, 
-                        schema=esquema_formateado, 
-                        if_exists='replace', 
-                        index=False,
-                        method='multi'
-                    )
-                    
-                    # 2. Procesar hoja 'ejecucion_general'
-                    df_ejecucion_general = pd.read_excel(xls, sheet_name="ejecucion_general")
-                    df_ejecucion_general = df_ejecucion_general.replace({np.nan: None})
-                    df_ejecucion_general.to_sql(
-                        f"{empresa_prefijo}_ejecucion_general", 
-                        con=engine, 
-                        schema=esquema_formateado, 
-                        if_exists='replace', 
-                        index=False,
-                        method='multi'
-                    )
-                    
-                    # 3. Procesar hoja 'ejecucion_por_zonas'
-                    df_ejecucion_zonas = pd.read_excel(xls, sheet_name="ejecucion_por_zonas")
-                    df_ejecucion_zonas = df_ejecucion_zonas.replace({np.nan: None})
-                    df_ejecucion_zonas.to_sql(
-                        f"{empresa_prefijo}_ejecucion_por_zonas", 
-                        con=engine, 
-                        schema=esquema_formateado, 
-                        if_exists='replace', 
-                        index=False,
-                        method='multi'
-                    )
-                    
-                    # 4. Procesar hoja 'orden_de_compra'
-                    df_orden_compra = pd.read_excel(xls, sheet_name="orden_de_compra")
-                    
-                    # Limpiar filas vacías
-                    df_orden_compra = df_orden_compra.dropna(how='all')
-                    df_orden_compra = df_orden_compra.replace({np.nan: None})
-                    
-                    # Agregar columna SUBSERVICIO BENEFICIARIO si no existe
-                    if 'SUBSERVICIO BENEFICIARIO' not in df_orden_compra.columns:
-                        df_orden_compra['SUBSERVICIO BENEFICIARIO'] = None
-                    
-                    df_orden_compra.to_sql(
-                        f"{empresa_prefijo}_orden_de_compra", 
-                        con=engine, 
-                        schema=esquema_formateado, 
-                        if_exists='replace', 
-                        index=False,
-                        method='multi'
-                    )
-                
-                # Crear una tabla adicional con los datos del formulario si es necesario
-                if datos_formulario:
-                    with engine.connect() as conn:
-                        # Crear DataFrame con datos del formulario
-                        llamado_df = pd.DataFrame({
-                            'I_D': [datos_formulario['id_licitacion']],
-                            'NUMERO DE LLAMADO': [datos_formulario.get('numero_anio', '').split('/')[0] if '/' in datos_formulario.get('numero_anio', '') else datos_formulario.get('numero_anio', '')],
-                            'AÑO DEL LLAMADO': [datos_formulario.get('numero_anio', '').split('/')[1] if '/' in datos_formulario.get('numero_anio', '') else datetime.now().year],
-                            'NOMBRE_DEL_LLAMADO': [datos_formulario.get('nombre_licitacion', '') or datos_formulario.get('nombre_llamado', '')],
-                            'EMPRESA_ADJUDICADA': [datos_formulario.get('empresa_adjudicada', '')],
-                            'RUC': [datos_formulario.get('ruc', '')],
-                            'FECHA_FIRMA_CONTRATO': [datos_formulario.get('fecha_firma', None)],
-                            'NUMERO_CONTRATO': [datos_formulario.get('numero_contrato', '')],
-                            'VIGENCIA_CONTRATO': [datos_formulario.get('vigencia_contrato', '')]
-                        })
-                        
-                        # Guardar en la tabla con prefijo si no hay datos en la tabla original
-                        if df_llamado.empty:
-                            llamado_df.to_sql(
-                                f"{empresa_prefijo}_llamado", 
-                                con=engine, 
-                                schema=esquema_formateado, 
-                                if_exists='replace', 
-                                index=False,
-                                method='multi'
-                            )
-                
-                # Si llegamos aquí, todo ha ido bien
-                return True, f"Archivo cargado correctamente en el esquema '{esquema_formateado}' con tablas para '{empresa_prefijo}'"
-                
-            except Exception as e:
-                return False, f"Error al procesar archivo Excel: {e}"
-                
-        elif archivo.name.endswith('.csv'):
-            # Procesar archivo CSV (código similar al de Excel)
-            try:
-                # Reiniciar el archivo
-                archivo.seek(0)
-                
-                # Leer CSV
-                contenido = archivo.getvalue().decode('utf-8')
-                df = pd.read_csv(io.StringIO(contenido))
-                
-                # Resto del procesamiento de CSV...
-                
-                return True, f"Archivo CSV cargado correctamente en el esquema '{esquema_formateado}'"
-                
-            except Exception as e:
-                return False, f"Error al procesar archivo CSV: {e}"
-        
-        else:
-            return False, "Formato de archivo no soportado. Use .xlsx, .xls o .csv"
-    
     except Exception as e:
-        return False, f"Error al cargar archivo: {e}"
+        return False, f"Error al cargar archivo Excel: {e}"
+
+def crear_tabla_llamado(conn, esquema, df):
+    """Crea la tabla llamado con su estructura específica"""
+    # Crear tabla
+    create_sql = f'''
+    CREATE TABLE IF NOT EXISTS "{esquema}".llamado (
+        "I_D" VARCHAR(50),
+        "NUMERO_DE_LLAMADO" VARCHAR(50),
+        "AÑO_DEL_LLAMADO" VARCHAR(10),
+        "NOMBRE_DEL_LLAMADO" TEXT,
+        "EMPRESA_ADJUDICADA" TEXT,
+        "RUC" VARCHAR(50),
+        "FECHA_FIRMA_CONTRATO" DATE,
+        "NUMERO_CONTRATO" VARCHAR(100),
+        "VIGENCIA_CONTRATO" TEXT,
+        "Fecha_de_Inicio_de_Poliza" DATE,
+        "Fecha_de_Finalizacion_de_Poliza" DATE
+    )
+    '''
+    conn.execute(text(create_sql))
+    
+    # Limpiar y cargar datos
+    df_clean = df.fillna('')
+    df_clean.to_sql('llamado', conn, schema=esquema, if_exists='append', index=False, method='multi')
+
+def crear_tabla_ejecucion_general(conn, esquema, df):
+    """Crea la tabla ejecucion_general con su estructura específica"""
+    create_sql = f'''
+    CREATE TABLE IF NOT EXISTS "{esquema}".ejecucion_general (
+        "COMODATO_SIN_COMODATO" VARCHAR(50),
+        "ESTADO_DEL_LOTE_ITEM" TEXT,
+        "LOTE" VARCHAR(50),
+        "ITEM" VARCHAR(50),
+        "DESCRIPCION_DEL_PRODUCTO" TEXT,
+        "PRESENTACION" TEXT,
+        "MARCA" TEXT,
+        "PROCEDENCIA" TEXT,
+        "DESCRIPCION_DEL_PRODUCTO_MARCA_PROCEDENCIA" TEXT,
+        "UNIDAD_DE_MEDIDA" VARCHAR(50),
+        "PRECIO_UNITARIO" DECIMAL(15,2),
+        "CANTIDAD_MINIMA" DECIMAL(15,2),
+        "CANTIDAD_MAXIMA" DECIMAL(15,2),
+        "REDISTRIBUCION_CANTIDAD_MINIMA" DECIMAL(15,2),
+        "REDISTRIBUCION_CANTIDAD_MAXIMA" DECIMAL(15,2),
+        "ENTRADAS_20_ADENDAS_DE_AMPLIACION" DECIMAL(15,2),
+        "SALIDAS_ADENDAS_DE_DISMINUCION" DECIMAL(15,2),
+        "TOTAL_ADJUDICADO" DECIMAL(15,2),
+        "CANTIDAD_EMITIDA" DECIMAL(15,2),
+        "SALDO_A_EMITIR" DECIMAL(15,2),
+        "PORCENTAJE_EMITIDO" DECIMAL(5,2)
+    )
+    '''
+    conn.execute(text(create_sql))
+    
+    # Limpiar y cargar datos
+    df_clean = df.fillna('')
+    df_clean.to_sql('ejecucion_general', conn, schema=esquema, if_exists='append', index=False, method='multi')
+
+def crear_tabla_orden_compra(conn, esquema, df):
+    """Crea la tabla orden_de_compra con su estructura específica"""
+    create_sql = f'''
+    CREATE TABLE IF NOT EXISTS "{esquema}".orden_de_compra (
+        "SIMESE_PEDIDO" VARCHAR(100),
+        "N_ORDEN_DE_COMPRA" VARCHAR(100),
+        "FECHA_DE_EMISION" DATE,
+        "CODIGO_DE_REACTIVOS_INSUMOS_CODIGO_DE_SERVICIO_BENEFICIARIO" TEXT,
+        "CODIGO_DE_REACTIVOS_INSUMOS" VARCHAR(100),
+        "ESTADO_SEGUN_DISTRIBUCION_INTERNA" TEXT,
+        "ESTADO_DEL_LOTE_ITEM" TEXT,
+        "SERVICIO_BENEFICIARIO" TEXT,
+        "SUBSERVICIO_BENEFICIARIO" TEXT,
+        "COMODATO_SIN_COMODATO" VARCHAR(50),
+        "LOTE" VARCHAR(50),
+        "ITEM" VARCHAR(50),
+        "CANTIDAD_SOLICITADA" DECIMAL(15,2),
+        "CANTIDAD_COMPLEMENTARIA_SOLICITADA" DECIMAL(15,2),
+        "UNIDAD_DE_MEDIDA" VARCHAR(50),
+        "DESCRIPCION_DEL_PRODUCTO_MARCA_PROCEDENCIA" TEXT,
+        "PRECIO_UNITARIO" DECIMAL(15,2),
+        "PORCENTAJE_EMITIDO_SERVICIO_BENEFICIARIO" DECIMAL(5,2),
+        "PORCENTAJE_DEL_LOTE_ITEM_GLOBAL" DECIMAL(5,2),
+        "SALDO_A_EMITIR_DEL_SERVICIO_SANITARIO" DECIMAL(15,2),
+        "MONTO_EMITIDO" DECIMAL(15,2),
+        "Porcentaje_para_emision_de_complementarios_USO_INTERNO" DECIMAL(5,2),
+        "Observaciones" TEXT
+    )
+    '''
+    conn.execute(text(create_sql))
+    
+    # Limpiar y cargar datos
+    df_clean = df.fillna('')
+    df_clean.to_sql('orden_de_compra', conn, schema=esquema, if_exists='append', index=False, method='multi')
+
+def crear_tabla_ejecucion_por_zonas(conn, esquema, df):
+    """Crea la tabla ejecucion_por_zonas con su estructura específica"""
+    create_sql = f'''
+    CREATE TABLE IF NOT EXISTS "{esquema}".ejecucion_por_zonas (
+        "CODIGO_DE_REACTIVOS_INSUMOS_CODIGO_DE_SERVICIO_BENEFICIARIO" TEXT,
+        "CODIGO_PARA_SERVICIO_BENEFICIARIO" VARCHAR(100),
+        "CODIGO_DE_REACTIVOS_INSUMOS" VARCHAR(100),
+        "ESTADO_SEGUN_DISTRIBUCION_INTERNA" TEXT,
+        "SERVICIO_BENEFICIARIO" TEXT,
+        "Porcentaje_para_emision_de_complementarios_USO_INTERNO" DECIMAL(5,2),
+        "COMODATO_SIN_COMODATO" VARCHAR(50),
+        "ESTADO_DEL_LOTE_ITEM" TEXT,
+        "LOTE" VARCHAR(50),
+        "ITEM" VARCHAR(50),
+        "DESCRIPCION_DEL_PRODUCTO_MARCA_PROCEDENCIA" TEXT,
+        "UNIDAD_DE_MEDIDA" VARCHAR(50),
+        "PRECIO_UNITARIO" DECIMAL(15,2),
+        "CANTIDAD_MINIMA" DECIMAL(15,2),
+        "CANTIDAD_MAXIMA" DECIMAL(15,2),
+        "REDISTRIBUCION_CANTIDAD_MINIMA" DECIMAL(15,2),
+        "REDISTRIBUCION_CANTIDAD_MAXIMA" DECIMAL(15,2),
+        "ENTRADAS_20_ADENDAS_DE_AMPLIACION" DECIMAL(15,2),
+        "SALIDAS_ADENDAS_DE_DISMINUCION" DECIMAL(15,2),
+        "TOTAL_ADJUDICADO" DECIMAL(15,2),
+        "CANTIDAD_EMITIDA" DECIMAL(15,2),
+        "SALDO_A_EMITIR" DECIMAL(15,2),
+        "PORCENTAJE_EMITIDO_POR_SERVICIO_SANITARIO" DECIMAL(5,2),
+        "PORCENTAJE_DEL_LOTE_ITEM_GLOBAL" DECIMAL(5,2),
+        "OBSERVACION" TEXT
+    )
+    '''
+    conn.execute(text(create_sql))
+    
+    # Limpiar y cargar datos
+    df_clean = df.fillna('')
+    df_clean.to_sql('ejecucion_por_zonas', conn, schema=esquema, if_exists='append', index=False, method='multi')
+
+def pagina_cargar_archivo():
+    """Página para cargar un nuevo archivo Excel (MODIFICADA)"""
+    st.header("Cargar Archivo Excel")
+    
+    # Obtener esquemas existentes
+    esquemas = obtener_esquemas_postgres()
+    
+    # Formulario para subir archivo
+    with st.form("upload_form"):
+        # Opción para crear nuevo esquema o usar uno existente
+        opcion_esquema = st.radio(
+            "Seleccione una opción:",
+            ["Crear nueva licitación", "Agregar a licitación existente"]
+        )
+        
+        if opcion_esquema == "Crear nueva licitación":
+            nuevo_esquema = st.text_input("Nombre de la nueva licitación (esquema):")
+        else:
+            esquema_seleccionado = st.selectbox(
+                "Seleccionar licitación existente:",
+                options=esquemas if esquemas else ["No hay esquemas disponibles"]
+            )
+        
+        # Campo para subir archivo EXCEL
+        archivo_excel = st.file_uploader(
+            "Seleccionar archivo Excel:", 
+            type=["xlsx", "xls"],
+            help="El archivo debe contener las hojas: llamado, ejecucion_general, orden_de_compra, ejecucion_por_zonas"
+        )
+        
+        # Botón para procesar
+        submit = st.form_submit_button("Procesar archivo Excel")
+        
+        if submit:
+            if not archivo_excel:
+                st.error("Por favor, seleccione un archivo Excel (.xlsx o .xls).")
+            elif opcion_esquema == "Crear nueva licitación" and not nuevo_esquema:
+                st.error("Por favor, ingrese un nombre para la nueva licitación.")
+            else:
+                esquema = nuevo_esquema if opcion_esquema == "Crear nueva licitación" else esquema_seleccionado
+                
+                # Normalizar el nombre del esquema
+                esquema = esquema.strip().lower().replace(" ", "_").replace("-", "_")
+                
+                # Mostrar progreso
+                with st.spinner("Procesando archivo Excel..."):
+                    # Procesar el archivo
+                    success, message = cargar_archivo_a_postgres(
+                        archivo_excel,
+                        archivo_excel.name,
+                        esquema
+                    )
+                
+                if success:
+                    st.success(message)
+                    st.balloons()
+                else:
+                    st.error(message)
 
 def obtener_archivos_cargados():
     """Obtiene la lista de archivos cargados con su estado actual"""
