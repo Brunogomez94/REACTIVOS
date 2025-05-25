@@ -428,38 +428,280 @@ def obtener_esquemas_postgres():
         return []
 
 def cargar_archivo_a_postgres(archivo, nombre_archivo, esquema, empresa_prefijo=None, datos_formulario=None):
-    """Carga un archivo Excel o CSV directamente a PostgreSQL"""
+    """
+    Carga un archivo Excel o CSV directamente a PostgreSQL.
+    Crea automáticamente el esquema y las tablas con el prefijo de la empresa adjudicada.
+    
+    Args:
+        archivo: Archivo Excel o CSV cargado
+        nombre_archivo: Nombre del archivo
+        esquema: Nombre del esquema a crear (basado en modalidad-numero/año)
+        empresa_prefijo: Prefijo para las tablas (opcional, se genera a partir de empresa_adjudicada)
+        datos_formulario: Diccionario con datos del formulario
+    
+    Returns:
+        tuple: (success, message)
+    """
     try:
-        # Primero, crear el esquema explícitamente
+        # Obtener el nombre de la empresa para el prefijo de las tablas
+        if not empresa_prefijo and datos_formulario and 'empresa_adjudicada' in datos_formulario:
+            empresa_prefijo = datos_formulario['empresa_adjudicada'].strip().upper().replace(" ", "_").replace(".", "")
+        
+        # Formatear el esquema para que sea válido en PostgreSQL
+        # IMPORTANTE: Reemplazar guiones por guiones bajos para evitar problemas
+        esquema_formateado = esquema.strip().lower().replace('/', '_').replace(' ', '_').replace('-', '_')
+        
+        # Mostrar información de debug
+        print(f"Creando esquema: {esquema_formateado}")
+        print(f"Prefijo de empresa: {empresa_prefijo}")
+        
+        # Crear el esquema y las tablas
         with engine.connect() as conn:
-            conn.execute(text(f'CREATE SCHEMA IF NOT EXISTS "{esquema}"'))
-            conn.commit()
-        
-        # Resto del procesamiento del archivo...
-        # [código existente para procesar Excel/CSV]
-        
-        # Al crear la tabla LLAMADO, combinar datos del formulario con datos del Excel
-        if datos_formulario and empresa_prefijo:
-            tabla_llamado = f"{empresa_prefijo}_llamado"
+            # 1. Crear el esquema si no existe - USANDO COMILLAS DOBLES
+            conn.execute(text(f'CREATE SCHEMA IF NOT EXISTS "{esquema_formateado}"'))
             
-            # Crear DataFrame con datos del formulario
-            llamado_df = pd.DataFrame({
-                'NOMBRE_LICITACION': [datos_formulario['nombre_licitacion']],
-                'I_D': [datos_formulario['id_licitacion']],
-                'NOMBRE_DEL_LLAMADO': [datos_formulario['nombre_llamado']],
-                'EMPRESA_ADJUDICADA': [datos_formulario['empresa_adjudicada']],
-                'RUC': [datos_formulario['ruc']],
-                'FECHA_FIRMA_CONTRATO': [datos_formulario['fecha_firma']],
-                'NUMERO_CONTRATO': [datos_formulario['numero_contrato']],
-                'VIGENCIA_CONTRATO': [datos_formulario['vigencia_contrato']]
+            # 2. Crear las tablas usando TO_SQL en lugar de SQL directo
+            # Primero crear tablas vacías con la estructura correcta
+            estructura_llamado = pd.DataFrame({
+                'I_D': pd.Series(dtype='object'),
+                'NUMERO DE LLAMADO': pd.Series(dtype='object'),
+                'AÑO DEL LLAMADO': pd.Series(dtype='object'),
+                'NOMBRE_DEL_LLAMADO': pd.Series(dtype='object'),
+                'EMPRESA_ADJUDICADA': pd.Series(dtype='object'),
+                'RUC': pd.Series(dtype='object'),
+                'FECHA_FIRMA_CONTRATO': pd.Series(dtype='datetime64[ns]'),
+                'NUMERO_CONTRATO': pd.Series(dtype='object'),
+                'VIGENCIA_CONTRATO': pd.Series(dtype='object'),
+                'Fecha de Inicio de Poliza': pd.Series(dtype='datetime64[ns]'),
+                'Fecha de Finalizacion de Poliza': pd.Series(dtype='datetime64[ns]')
             })
             
-            # Guardar tabla llamado combinada
-            llamado_df.to_sql(tabla_llamado, con=engine, schema=esquema, if_exists='replace', index=False)
+            estructura_ejecucion_general = pd.DataFrame({
+                'COMODATO // SIN COMODATO': pd.Series(dtype='object'),
+                'ESTADO DEL LOTE / ITEM': pd.Series(dtype='object'),
+                'LOTE': pd.Series(dtype='object'),
+                'ITEM': pd.Series(dtype='object'),
+                'DESCRIPCION DEL PRODUCTO': pd.Series(dtype='object'),
+                'DESCRIPCION DEL PRODUCTO // MARCA // PROCEDENCIA': pd.Series(dtype='object'),
+                'UNIDAD DE MEDIDA': pd.Series(dtype='object'),
+                'PRECIO UNITARIO': pd.Series(dtype='float64'),
+                'REDISTRIBUCION (CANTIDAD MAXIMA)': pd.Series(dtype='float64'),
+                'CANTIDAD EMITIDA': pd.Series(dtype='float64'),
+                'SALDO A EMITIR': pd.Series(dtype='float64'),
+                'PORCENTAJE EMITIDO': pd.Series(dtype='float64')
+            })
+            
+            estructura_ejecucion_zonas = pd.DataFrame({
+                'CODIGO DE REACTIVOS / INSUMOS + CODIGO DE SERVICIO BENEFICIARIO': pd.Series(dtype='object'),
+                'SERVICIO BENEFICIARIO': pd.Series(dtype='object'),
+                'LOTE': pd.Series(dtype='object'),
+                'ITEM': pd.Series(dtype='object'),
+                'DESCRIPCION DEL PRODUCTO // MARCA // PROCEDENCIA': pd.Series(dtype='object'),
+                'PRECIO UNITARIO': pd.Series(dtype='float64'),
+                'REDISTRIBUCION (CANTIDAD MAXIMA)': pd.Series(dtype='float64')
+            })
+            
+            estructura_orden_compra = pd.DataFrame({
+                'SIMESE (PEDIDO)': pd.Series(dtype='object'),
+                'N° ORDEN DE COMPRA': pd.Series(dtype='object'),
+                'SERVICIO BENEFICIARIO': pd.Series(dtype='object'),
+                'LOTE': pd.Series(dtype='object'),
+                'ITEM': pd.Series(dtype='object'),
+                'CANTIDAD SOLICITADA': pd.Series(dtype='float64')
+            })
+            
+            # Crear tablas vacías con la estructura básica
+            try:
+                # Usar dtype_backend='numpy' para evitar problemas de tipos de datos
+                estructura_llamado.to_sql(
+                    f"{empresa_prefijo}_llamado", 
+                    con=engine, 
+                    schema=esquema_formateado, 
+                    if_exists='replace', 
+                    index=False,
+                    method='multi'
+                )
+                
+                estructura_ejecucion_general.to_sql(
+                    f"{empresa_prefijo}_ejecucion_general", 
+                    con=engine, 
+                    schema=esquema_formateado, 
+                    if_exists='replace', 
+                    index=False,
+                    method='multi'
+                )
+                
+                estructura_ejecucion_zonas.to_sql(
+                    f"{empresa_prefijo}_ejecucion_por_zonas", 
+                    con=engine, 
+                    schema=esquema_formateado, 
+                    if_exists='replace', 
+                    index=False,
+                    method='multi'
+                )
+                
+                estructura_orden_compra.to_sql(
+                    f"{empresa_prefijo}_orden_de_compra", 
+                    con=engine, 
+                    schema=esquema_formateado, 
+                    if_exists='replace', 
+                    index=False,
+                    method='multi'
+                )
+                
+                print("Tablas vacías creadas con éxito")
+            except Exception as e:
+                print(f"Error al crear tablas vacías: {e}")
+                raise e
         
-        # Resto del código...
+        # Procesar el archivo Excel o CSV
+        if archivo.name.endswith(('.xlsx', '.xls')):
+            try:
+                # Reiniciar el archivo para lectura
+                archivo.seek(0)
+                
+                # Leer el archivo Excel
+                xls = pd.ExcelFile(archivo)
+                
+                # Comprobar que existan las hojas requeridas
+                required_sheets = ["llamado", "ejecucion_general", "ejecucion_por_zonas", "orden_de_compra"]
+                missing_sheets = [sheet for sheet in required_sheets if sheet not in xls.sheet_names]
+                
+                if missing_sheets:
+                    return False, f"Error: Faltan las siguientes hojas en el Excel: {', '.join(missing_sheets)}"
+                
+                # Procesar cada hoja
+                with engine.connect() as conn:
+                    # 1. Procesar hoja 'llamado'
+                    df_llamado = pd.read_excel(xls, sheet_name="llamado")
+                    
+                    # Mapear columnas del Excel a las columnas esperadas
+                    if 'I.D.' in df_llamado.columns:
+                        df_llamado = df_llamado.rename(columns={
+                            'I.D.': 'I_D',
+                            'Numero de llamado': 'NUMERO DE LLAMADO',
+                            'Año del Llamado': 'AÑO DEL LLAMADO',
+                            'NOMBRE DEL LLAMADO': 'NOMBRE_DEL_LLAMADO',
+                            'EMPRESA ADJUDICADA': 'EMPRESA_ADJUDICADA',
+                            'FECHA DE FIRMA DEL CONTRATO:': 'FECHA_FIRMA_CONTRATO',
+                            'N° de Contrato / Año:': 'NUMERO_CONTRATO',
+                            'Vigencia del Contrato:': 'VIGENCIA_CONTRATO'
+                        })
+                    
+                    # Agregar columna RUC si no existe
+                    if 'RUC' not in df_llamado.columns:
+                        df_llamado['RUC'] = datos_formulario.get('ruc', '') if datos_formulario else ''
+                    
+                    # Limpiar DataFrame
+                    df_llamado = df_llamado.replace({np.nan: None})
+                    
+                    # Guardar en la tabla con prefijo
+                    df_llamado.to_sql(
+                        f"{empresa_prefijo}_llamado", 
+                        con=engine, 
+                        schema=esquema_formateado, 
+                        if_exists='replace', 
+                        index=False,
+                        method='multi'
+                    )
+                    
+                    # 2. Procesar hoja 'ejecucion_general'
+                    df_ejecucion_general = pd.read_excel(xls, sheet_name="ejecucion_general")
+                    df_ejecucion_general = df_ejecucion_general.replace({np.nan: None})
+                    df_ejecucion_general.to_sql(
+                        f"{empresa_prefijo}_ejecucion_general", 
+                        con=engine, 
+                        schema=esquema_formateado, 
+                        if_exists='replace', 
+                        index=False,
+                        method='multi'
+                    )
+                    
+                    # 3. Procesar hoja 'ejecucion_por_zonas'
+                    df_ejecucion_zonas = pd.read_excel(xls, sheet_name="ejecucion_por_zonas")
+                    df_ejecucion_zonas = df_ejecucion_zonas.replace({np.nan: None})
+                    df_ejecucion_zonas.to_sql(
+                        f"{empresa_prefijo}_ejecucion_por_zonas", 
+                        con=engine, 
+                        schema=esquema_formateado, 
+                        if_exists='replace', 
+                        index=False,
+                        method='multi'
+                    )
+                    
+                    # 4. Procesar hoja 'orden_de_compra'
+                    df_orden_compra = pd.read_excel(xls, sheet_name="orden_de_compra")
+                    
+                    # Limpiar filas vacías
+                    df_orden_compra = df_orden_compra.dropna(how='all')
+                    df_orden_compra = df_orden_compra.replace({np.nan: None})
+                    
+                    # Agregar columna SUBSERVICIO BENEFICIARIO si no existe
+                    if 'SUBSERVICIO BENEFICIARIO' not in df_orden_compra.columns:
+                        df_orden_compra['SUBSERVICIO BENEFICIARIO'] = None
+                    
+                    df_orden_compra.to_sql(
+                        f"{empresa_prefijo}_orden_de_compra", 
+                        con=engine, 
+                        schema=esquema_formateado, 
+                        if_exists='replace', 
+                        index=False,
+                        method='multi'
+                    )
+                
+                # Crear una tabla adicional con los datos del formulario si es necesario
+                if datos_formulario:
+                    with engine.connect() as conn:
+                        # Crear DataFrame con datos del formulario
+                        llamado_df = pd.DataFrame({
+                            'I_D': [datos_formulario['id_licitacion']],
+                            'NUMERO DE LLAMADO': [datos_formulario.get('numero_anio', '').split('/')[0] if '/' in datos_formulario.get('numero_anio', '') else datos_formulario.get('numero_anio', '')],
+                            'AÑO DEL LLAMADO': [datos_formulario.get('numero_anio', '').split('/')[1] if '/' in datos_formulario.get('numero_anio', '') else datetime.now().year],
+                            'NOMBRE_DEL_LLAMADO': [datos_formulario.get('nombre_licitacion', '') or datos_formulario.get('nombre_llamado', '')],
+                            'EMPRESA_ADJUDICADA': [datos_formulario.get('empresa_adjudicada', '')],
+                            'RUC': [datos_formulario.get('ruc', '')],
+                            'FECHA_FIRMA_CONTRATO': [datos_formulario.get('fecha_firma', None)],
+                            'NUMERO_CONTRATO': [datos_formulario.get('numero_contrato', '')],
+                            'VIGENCIA_CONTRATO': [datos_formulario.get('vigencia_contrato', '')]
+                        })
+                        
+                        # Guardar en la tabla con prefijo si no hay datos en la tabla original
+                        if df_llamado.empty:
+                            llamado_df.to_sql(
+                                f"{empresa_prefijo}_llamado", 
+                                con=engine, 
+                                schema=esquema_formateado, 
+                                if_exists='replace', 
+                                index=False,
+                                method='multi'
+                            )
+                
+                # Si llegamos aquí, todo ha ido bien
+                return True, f"Archivo cargado correctamente en el esquema '{esquema_formateado}' con tablas para '{empresa_prefijo}'"
+                
+            except Exception as e:
+                return False, f"Error al procesar archivo Excel: {e}"
+                
+        elif archivo.name.endswith('.csv'):
+            # Procesar archivo CSV (código similar al de Excel)
+            try:
+                # Reiniciar el archivo
+                archivo.seek(0)
+                
+                # Leer CSV
+                contenido = archivo.getvalue().decode('utf-8')
+                df = pd.read_csv(io.StringIO(contenido))
+                
+                # Resto del procesamiento de CSV...
+                
+                return True, f"Archivo CSV cargado correctamente en el esquema '{esquema_formateado}'"
+                
+            except Exception as e:
+                return False, f"Error al procesar archivo CSV: {e}"
         
-        return True, f"Archivo cargado correctamente con ID: {archivo_id}"
+        else:
+            return False, "Formato de archivo no soportado. Use .xlsx, .xls o .csv"
+    
     except Exception as e:
         return False, f"Error al cargar archivo: {e}"
 
@@ -889,6 +1131,8 @@ def pagina_cargar_archivo():
         st.session_state.licitacion_seleccionada = None
     if 'licitacion_data' not in st.session_state:
         st.session_state.licitacion_data = {}
+    if 'datos_confirmados' not in st.session_state:
+        st.session_state.datos_confirmados = False
     
     # BUSCADOR PEQUEÑO SOLO PARA ID - FUERA DEL FORMULARIO
     col_search1, col_search2 = st.columns([1, 3])
@@ -946,6 +1190,43 @@ def pagina_cargar_archivo():
             
             numero_anio = st.text_input("N° / Año de Modalidad:",
                                        value=st.session_state.licitacion_data.get('numero_anio', ''))
+            
+            # Botón de confirmación justo después de N° / Año de Modalidad
+            confirmar_datos_iniciales = st.form_submit_button("Confirmar Datos Iniciales")
+            
+            if confirmar_datos_iniciales:
+                if not id_licitacion or modalidad == "Seleccionar..." or not numero_anio:
+                    st.error("Por favor, complete todos los campos obligatorios antes de confirmar.")
+                else:
+                    # Verificar si ya existe una combinación similar en la base de datos
+                    try:
+                        with engine.connect() as conn:
+                            esquemas = obtener_esquemas_postgres()
+                            duplicado_encontrado = False
+                            
+                            for esquema in esquemas:
+                                try:
+                                    query = text(f"""
+                                        SELECT "I_D", "NOMBRE DEL LLAMADO", "EMPRESA ADJUDICADA", "NUMERO DE LLAMADO"
+                                        FROM "{esquema}"."llamado"
+                                        WHERE "I_D" = :id_licitacion
+                                    """)
+                                    result = conn.execute(query, {'id_licitacion': id_licitacion})
+                                    coincidencia = result.fetchone()
+                                    
+                                    if coincidencia:
+                                        duplicado_encontrado = True
+                                        st.warning(f"⚠️ Ya existe una licitación con ID '{id_licitacion}' en el esquema '{esquema}'.")
+                                        st.info(f"Detalles: {coincidencia[1]} - Empresa: {coincidencia[2]} - N°: {coincidencia[3]}")
+                                        break
+                                except Exception:
+                                    pass
+                            
+                            if not duplicado_encontrado:
+                                st.success("✅ Datos iniciales confirmados. Por favor, complete el resto del formulario.")
+                                st.session_state.datos_confirmados = True
+                    except Exception as e:
+                        st.error(f"Error al verificar duplicados: {e}")
         
         # Si se ingresó un ID de licitación, intentar buscar datos existentes
         if id_licitacion and id_licitacion == st.session_state.licitacion_seleccionada:
@@ -1025,7 +1306,7 @@ def pagina_cargar_archivo():
                 # Si falla el formato español, mostrar en formato normal
                 st.caption(f"Fecha seleccionada: {fecha_firma.strftime('%d/%m/%Y')}")
         
-        # Otros campos adicionales
+        # Último campo (anteriormente duplicado, ahora solo uno)
         col5, _ = st.columns(2)
         
         with col5:
@@ -1055,7 +1336,9 @@ def pagina_cargar_archivo():
         
         with col_btns1:
             # Botón para procesar - ESTE ES EL BOTÓN SUBMIT DEL FORMULARIO
-            submit = st.form_submit_button("🚀 Procesar y Cargar Archivo", type="primary")
+            # Deshabilitar el botón si los datos no están confirmados
+            submit = st.form_submit_button("🚀 Procesar y Cargar Archivo", type="primary", 
+                                          disabled=not st.session_state.datos_confirmados)
         
         with col_btns2:
             # Botón para limpiar - también es un form_submit_button
@@ -1118,6 +1401,7 @@ def pagina_cargar_archivo():
             # Limpiar estado después de éxito
             st.session_state.licitacion_seleccionada = None
             st.session_state.licitacion_data = {}
+            st.session_state.datos_confirmados = False
             st.rerun()
         else:
             st.error(message)
@@ -1126,6 +1410,7 @@ def pagina_cargar_archivo():
         # Limpiar estado del formulario
         st.session_state.licitacion_seleccionada = None
         st.session_state.licitacion_data = {}
+        st.session_state.datos_confirmados = False
         st.rerun()
 
 def pagina_ver_cargas():
